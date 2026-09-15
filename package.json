@@ -1,14 +1,14 @@
 {
-  "name": "obsidian-yuque-style",
+  "name": "yuque-style",
   "version": "0.1.0",
-  "description": "Yuque-style editing and reading experience for Obsidian",
+  "description": "语雀风格编辑阅读体验 + 语雀文档同步（Obsidian 插件）",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
   },
   "keywords": [],
-  "author": "",
+  "author": "chenxixi",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.11.30",
@@ -16,6 +16,7 @@
     "esbuild": "^0.21.5",
     "obsidian": "latest",
     "tslib": "2.6.3",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "jsdom": "^24.0.0"
   }
 }
