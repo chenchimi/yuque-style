@@ -1,0 +1,433 @@
+/* ==========================================================================
+   Yuque Style - 语雀风格编辑与阅读体验
+   ========================================================================== */
+
+/* ---------- 悬浮格式工具栏 ---------- */
+.yuque-toolbar {
+  position: absolute;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+  user-select: none;
+}
+
+.yuque-toolbar-btn {
+  min-width: 30px;
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-normal);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.yuque-toolbar-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-accent);
+}
+
+/* ---------- 阅读模式：语雀式版式 ---------- */
+.markdown-preview-view.yuque-reader {
+  max-width: var(--yuque-content-width, 820px);
+  margin: 0 auto;
+  padding-left: 32px;
+  padding-right: 32px;
+}
+
+/* 文档头 */
+.yuque-doc-header {
+  padding: 40px 0 20px;
+  margin-bottom: 28px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.yuque-doc-header .yuque-doc-title {
+  margin: 0 0 12px;
+  font-size: 1.9em;
+  font-weight: 700;
+  line-height: 1.4;
+  color: var(--text-normal);
+}
+
+.yuque-doc-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.85em;
+  color: var(--text-faint);
+}
+
+.yuque-doc-meta .yuque-tag {
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--background-modifier-hover);
+  color: var(--text-accent);
+}
+
+/* 浮动目录 */
+.yuque-outline {
+  position: fixed;
+  top: 120px;
+  right: 24px;
+  width: 220px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 14px 16px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-s);
+  z-index: 30;
+}
+
+.yuque-outline.yuque-outline-hidden {
+  display: none;
+}
+
+.yuque-outline-title {
+  margin-bottom: 10px;
+  font-size: 0.8em;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  text-transform: uppercase;
+}
+
+.yuque-outline-item {
+  display: block;
+  padding: 4px 0;
+  font-size: 0.85em;
+  color: var(--text-muted);
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.yuque-outline-item:hover {
+  color: var(--text-accent);
+}
+
+.yuque-outline-h2 {
+  padding-left: 14px;
+}
+
+.yuque-outline-h3 {
+  padding-left: 28px;
+}
+
+@media (max-width: 1280px) {
+  .yuque-outline {
+    display: none;
+  }
+}
+
+/* ---------- 语雀式排版细节 ---------- */
+.markdown-preview-view.yuque-reader h1,
+.markdown-preview-view.yuque-reader h2,
+.markdown-preview-view.yuque-reader h3 {
+  font-weight: 700;
+  margin-top: 1.6em;
+  margin-bottom: 0.6em;
+}
+
+.markdown-preview-view.yuque-reader h1 {
+  font-size: 1.6em;
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding-bottom: 0.3em;
+}
+
+.markdown-preview-view.yuque-reader h2 {
+  font-size: 1.35em;
+}
+
+.markdown-preview-view.yuque-reader h3 {
+  font-size: 1.15em;
+}
+
+/* 引用块卡片化 */
+.markdown-preview-view.yuque-reader blockquote {
+  margin: 1em 0;
+  padding: 12px 16px;
+  border-left: 3px solid var(--interactive-accent);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+}
+
+/* Callout 卡片 */
+.markdown-preview-view.yuque-reader .callout {
+  border-radius: 10px;
+  border: 1px solid var(--background-modifier-border);
+  overflow: hidden;
+}
+
+/* 表格 */
+.markdown-preview-view.yuque-reader table {
+  width: 100%;
+  margin: 1.2em 0;
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+
+.markdown-preview-view.yuque-reader th,
+.markdown-preview-view.yuque-reader td {
+  padding: 8px 12px;
+  border: 1px solid var(--background-modifier-border);
+}
+
+.markdown-preview-view.yuque-reader th {
+  background: var(--background-secondary);
+  font-weight: 600;
+}
+
+/* 行内链接样式 */
+.markdown-preview-view.yuque-reader a.internal-link,
+.markdown-preview-view.yuque-reader a.external-link {
+  color: var(--text-accent);
+  text-decoration: none;
+  border-bottom: 1px dashed var(--text-accent);
+}
+
+.markdown-preview-view.yuque-reader a.internal-link:hover,
+.markdown-preview-view.yuque-reader a.external-link:hover {
+  border-bottom-style: solid;
+}
+
+/* 代码块 */
+.markdown-preview-view.yuque-reader pre {
+  border-radius: 10px;
+  border: 1px solid var(--background-modifier-border);
+}
+
+/* 任务列表 */
+.markdown-preview-view.yuque-reader .task-list-item {
+  list-style: none;
+  padding: 3px 0;
+}
+
+.markdown-preview-view.yuque-reader .task-list-item.is-checked {
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+
+/* ---------- 斜杠快捷菜单 ---------- */
+.suggestion-item .yuque-slash-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+
+.suggestion-item .yuque-slash-name {
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.suggestion-item .yuque-slash-hint {
+  font-size: 0.8em;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+
+/* ============ 语雀同步 ============ */
+.yuque-sync-modal .modal-content {
+  padding: 12px 16px 16px;
+}
+
+.yuque-sync-log {
+  max-height: 320px;
+  min-height: 120px;
+  overflow-y: auto;
+  background: var(--background-secondary);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 0.85em;
+  line-height: 1.6;
+}
+
+.yuque-sync-log-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.yuque-sync-success {
+  color: var(--text-success, #4caf50);
+}
+
+.yuque-sync-error {
+  color: var(--text-error, #e53935);
+}
+
+.yuque-doc-select-list {
+  max-height: 400px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+.yuque-doc-select-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+}
+
+.yuque-folder-input {
+  width: 100%;
+}
+
+/* ============ 标题自动编号（阅读模式） ============ */
+.yuque-reader.yuque-heading-num {
+  counter-reset: yq-h1 yq-h2 yq-h3 yq-h4;
+}
+
+.yuque-reader.yuque-heading-num h1 {
+  counter-increment: yq-h1;
+  counter-reset: yq-h2 yq-h3 yq-h4;
+}
+
+.yuque-reader.yuque-heading-num h2 {
+  counter-increment: yq-h2;
+  counter-reset: yq-h3 yq-h4;
+}
+
+.yuque-reader.yuque-heading-num h3 {
+  counter-increment: yq-h3;
+  counter-reset: yq-h4;
+}
+
+.yuque-reader.yuque-heading-num h4 {
+  counter-increment: yq-h4;
+}
+
+.yuque-reader.yuque-heading-num h1::before {
+  content: counter(yq-h1) " ";
+  color: var(--text-accent, #4b7bec);
+  font-weight: 700;
+  margin-right: 0.2em;
+}
+
+.yuque-reader.yuque-heading-num h2::before {
+  content: counter(yq-h1) "." counter(yq-h2) " ";
+  color: var(--text-accent, #4b7bec);
+  font-weight: 700;
+  margin-right: 0.2em;
+}
+
+.yuque-reader.yuque-heading-num h3::before {
+  content: counter(yq-h1) "." counter(yq-h2) "." counter(yq-h3) " ";
+  color: var(--text-accent, #4b7bec);
+  font-weight: 600;
+  margin-right: 0.2em;
+}
+
+.yuque-reader.yuque-heading-num h4::before {
+  content: counter(yq-h1) "." counter(yq-h2) "." counter(yq-h3) "." counter(yq-h4) " ";
+  color: var(--text-accent, #4b7bec);
+  font-weight: 600;
+  margin-right: 0.2em;
+}
+
+/* 文档头（yuque-doc-header）里的标题不参与编号 */
+.yuque-reader.yuque-heading-num .yuque-doc-header h1,
+.yuque-reader.yuque-heading-num .yuque-doc-header h2,
+.yuque-reader.yuque-heading-num .yuque-doc-header h3 {
+  counter-increment: none;
+}
+
+.yuque-reader.yuque-heading-num .yuque-doc-header h1::before,
+.yuque-reader.yuque-heading-num .yuque-doc-header h2::before,
+.yuque-reader.yuque-heading-num .yuque-doc-header h3::before {
+  content: none;
+}
+
+/* 无 h1 的文档：h2 作为顶级编号（1 / 1.1），h3 为 1.1.x */
+.yuque-reader.yuque-heading-num.yuque-heading-num-no-h1 h2::before {
+  content: counter(yq-h2) " ";
+}
+
+.yuque-reader.yuque-heading-num.yuque-heading-num-no-h1 h3::before {
+  content: counter(yq-h2) "." counter(yq-h3) " ";
+}
+
+.yuque-reader.yuque-heading-num.yuque-heading-num-no-h1 h4::before {
+  content: counter(yq-h2) "." counter(yq-h3) "." counter(yq-h4) " ";
+}
+
+/* ============ 标题自动编号（实时预览模式，CM6） ============ */
+.markdown-source-view.yuque-heading-num .cm-editor {
+  counter-reset: yq-h1 yq-h2 yq-h3 yq-h4;
+}
+
+.markdown-source-view.yuque-heading-num .HyperMD-header-1 {
+  counter-increment: yq-h1;
+  counter-reset: yq-h2 yq-h3 yq-h4;
+}
+
+.markdown-source-view.yuque-heading-num .HyperMD-header-2 {
+  counter-increment: yq-h2;
+  counter-reset: yq-h3 yq-h4;
+}
+
+.markdown-source-view.yuque-heading-num .HyperMD-header-3 {
+  counter-increment: yq-h3;
+  counter-reset: yq-h4;
+}
+
+.markdown-source-view.yuque-heading-num .HyperMD-header-4 {
+  counter-increment: yq-h4;
+}
+
+.markdown-source-view.yuque-heading-num .HyperMD-header-1 .cm-header-1::before {
+  content: counter(yq-h1) " ";
+  color: var(--text-accent, #4b7bec);
+  font-weight: 700;
+  margin-right: 0.2em;
+}
+
+.markdown-source-view.yuque-heading-num .HyperMD-header-2 .cm-header-2::before {
+  content: counter(yq-h1) "." counter(yq-h2) " ";
+  color: var(--text-accent, #4b7bec);
+  font-weight: 700;
+  margin-right: 0.2em;
+}
+
+.markdown-source-view.yuque-heading-num .HyperMD-header-3 .cm-header-3::before {
+  content: counter(yq-h1) "." counter(yq-h2) "." counter(yq-h3) " ";
+  color: var(--text-accent, #4b7bec);
+  font-weight: 600;
+  margin-right: 0.2em;
+}
+
+.markdown-source-view.yuque-heading-num .HyperMD-header-4 .cm-header-4::before {
+  content: counter(yq-h1) "." counter(yq-h2) "." counter(yq-h3) "." counter(yq-h4) " ";
+  color: var(--text-accent, #4b7bec);
+  font-weight: 600;
+  margin-right: 0.2em;
+}
+
+/* 无 h1 的文档：h2 当顶级 */
+.markdown-source-view.yuque-heading-num.yuque-heading-num-no-h1 .HyperMD-header-2 .cm-header-2::before {
+  content: counter(yq-h2) " ";
+}
+
+.markdown-source-view.yuque-heading-num.yuque-heading-num-no-h1 .HyperMD-header-3 .cm-header-3::before {
+  content: counter(yq-h2) "." counter(yq-h3) " ";
+}
+
+.markdown-source-view.yuque-heading-num.yuque-heading-num-no-h1 .HyperMD-header-4 .cm-header-4::before {
+  content: counter(yq-h2) "." counter(yq-h3) "." counter(yq-h4) " ";
+}
