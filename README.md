@@ -2,7 +2,7 @@
 
 模仿语雀文档编辑、查看体验的 Obsidian 插件，并支持把语雀知识库一键同步到 Obsidian。
 
-当前版本：**v0.6.9**
+仓库：<https://github.com/chenchimi/yuque-style>　·　当前版本：**v0.6.9**
 
 ## 功能总览
 
@@ -87,35 +87,92 @@
 | 开启 / 关闭阅读增强 | 快速开关阅读模式增强 |
 | 插入卡片块 / 待办清单 / 表格 | 快捷插入常用块 |
 
-## 安装（手动）
+## 安装
+
+### 方式一：直接安装（不需要 Node，推荐）
+
+插件就是三个文件。手动放进 vault 即可，不用编译。
+
+**1. 找到（或新建）插件目录**
+
+```
+<你的仓库>/.obsidian/plugins/yuque-style/
+```
+
+> 目录名必须是 `yuque-style`（与 `manifest.json` 里的 `id` 一致），Obsidian 才认。
+> 看不到 `.obsidian` 是因为它是隐藏目录：Windows 在资源管理器里勾上「查看 → 隐藏的项目」；
+> 更省事的办法是在 Obsidian 里右键左侧文件列表的任意文件夹 →「在系统资源管理器中显示」，
+> 再往上退到 `.obsidian`。
+
+**2. 把这三个文件放进该目录**（注意**不要再套一层文件夹**）
+
+| 文件 | 作用 |
+| --- | --- |
+| `main.js` | 插件代码（构建产物，已随仓库提交，不需要自己编译） |
+| `manifest.json` | 插件元信息：名称、版本、最低 Obsidian 版本 |
+| `styles.css` | 插件的全部样式 |
+
+逐个下载：[main.js](https://raw.githubusercontent.com/chenchimi/yuque-style/main/main.js) ·
+[manifest.json](https://raw.githubusercontent.com/chenchimi/yuque-style/main/manifest.json) ·
+[styles.css](https://raw.githubusercontent.com/chenchimi/yuque-style/main/styles.css)
+
+（也可以在仓库首页点 **Code → Download ZIP**，解压后取出这三个文件。）
+
+命令行一次到位（PowerShell，把第一行的路径换成你自己的仓库）：
+
+```powershell
+$p = "$env:USERPROFILE\Documents\我的仓库\.obsidian\plugins\yuque-style"
+New-Item -ItemType Directory -Force -Path $p | Out-Null
+foreach ($f in 'main.js','manifest.json','styles.css') {
+  Invoke-WebRequest "https://raw.githubusercontent.com/chenchimi/yuque-style/main/$f" -OutFile "$p\$f"
+}
+```
+
+**3. 在 Obsidian 里启用**
+
+打开 **设置 → 第三方插件**：如果是第一次装插件，先关掉「安全模式 / 限制模式」→ 点「刷新」→
+在列表里启用 **Yuque Style**。
+
+**4. 配好就能用**
+
+到 **设置 → Yuque Style** 填语雀 Token（语雀网页「账号设置 → 开发者 → Token」，需要读取知识库与文档的权限），
+再用命令面板（Ctrl/Cmd+P）执行「语雀同步：添加/更新同步任务」建第一个任务即可。
+
+### 方式二：从源码构建
 
 1. 安装 [Node.js](https://nodejs.org/)（v18+）
-2. 在本项目目录执行：
+2. 克隆并构建：
 
    ```bash
+   git clone https://github.com/chenchimi/yuque-style.git
+   cd yuque-style
    npm install
    npm run build
    ```
 
-3. 将 `manifest.json`、`main.js`、`styles.css` 三个文件复制到你的仓库：
+3. 把 `manifest.json`、`main.js`、`styles.css` 复制到 `<你的仓库>/.obsidian/plugins/yuque-style/`
+4. 接方式一的第 3、4 步
 
-   ```
-   <你的仓库>/.obsidian/plugins/yuque-style/
-   ```
+### 更新已安装的版本
 
-4. 重启 Obsidian，在 设置 → 第三方插件 中启用 **Yuque Style**
+覆盖 `main.js` / `manifest.json` / `styles.css` 三个文件，然后在 **设置 → 第三方插件** 里把
+Yuque Style 关掉再打开（或重启 Obsidian）就会加载新版本。
 
-> 更新插件后需重启 Obsidian（或在第三方插件里关掉再打开）才会加载新版本。
+设置、Token 与同步记录都保存在 `data.json`，更新不会丢；它不在仓库里，也不需要手动备份。
 
 ## 开发调试
 
 ```bash
 npm run dev        # watch 模式，改代码自动重新构建
-npm run build      # 类型检查 + 产物构建
-node tests/test-lake-run.cjs    # Lake → Markdown 转换器离线单测（30 项断言）
+npm run build      # 类型检查（含 tools/）+ 产物构建
+npm test           # 全部单测（vitest，260+ 个用例）
+npm run probe      # 打包 tools/ 下的离线探针（体检 / 配额盘点 / 失联文件诊断）
 ```
 
 配合 Obsidian 的热重载插件（Hot Reload）或手动重启即可调试。
+
+> 仓库里提交了构建产物 `main.js`（用户直接下载即可用），所以**改完源码记得 `npm run build` 并一起提交**，
+> 否则仓库里的成品会与源码脱节。
 
 ## 技术说明
 
