@@ -2,7 +2,7 @@
 
 模仿语雀文档编辑、查看体验的 Obsidian 插件，并支持把语雀知识库一键同步到 Obsidian。
 
-仓库：<https://github.com/chenchimi/yuque-style>　·　当前版本：**v0.6.9**
+仓库：<https://github.com/chenchimi/yuque-style>　·　当前版本：**[v0.6.9](https://github.com/chenchimi/yuque-style/releases/tag/0.6.9)**
 
 ## 功能总览
 
@@ -112,7 +112,17 @@
 | `manifest.json` | 插件元信息：名称、版本、最低 Obsidian 版本 |
 | `styles.css` | 插件的全部样式 |
 
-逐个下载：[main.js](https://raw.githubusercontent.com/chenchimi/yuque-style/main/main.js) ·
+**推荐用 Release 附件**——链接固定在这一版，之后 `main` 分支怎么改都不受影响：
+
+[main.js](https://github.com/chenchimi/yuque-style/releases/download/0.6.9/main.js) ·
+[manifest.json](https://github.com/chenchimi/yuque-style/releases/download/0.6.9/manifest.json) ·
+[styles.css](https://github.com/chenchimi/yuque-style/releases/download/0.6.9/styles.css)
+
+（也可直接打开 [Release 页面](https://github.com/chenchimi/yuque-style/releases/latest) 下载附件。）
+
+想跟 `main` 分支的最新提交，则用这组 raw 链接：
+
+[main.js](https://raw.githubusercontent.com/chenchimi/yuque-style/main/main.js) ·
 [manifest.json](https://raw.githubusercontent.com/chenchimi/yuque-style/main/manifest.json) ·
 [styles.css](https://raw.githubusercontent.com/chenchimi/yuque-style/main/styles.css)
 
@@ -138,7 +148,18 @@ foreach ($f in 'main.js','manifest.json','styles.css') {
 到 **设置 → Yuque Style** 填语雀 Token（语雀网页「账号设置 → 开发者 → Token」，需要读取知识库与文档的权限），
 再用命令面板（Ctrl/Cmd+P）执行「语雀同步：添加/更新同步任务」建第一个任务即可。
 
-### 方式二：从源码构建
+### 方式二：BRAT（在 Obsidian 内安装与更新，推荐长期使用）
+
+[BRAT](https://github.com/TfTHacker/obsidian42-brat) 是「从 GitHub 仓库安装插件」的社区插件，好处是**新版本发布后能在 Obsidian 里直接升级**。
+
+1. 先装 BRAT（社区插件市场搜 `BRAT`，或按方式一把它放进 `.obsidian/plugins/`）
+2. 启用 BRAT，命令面板执行 **BRAT: Add a beta plugin for testing**
+3. 填仓库名 `chenchimi/yuque-style` 并确认，BRAT 会自动下载 Release 里的三个文件
+4. 之后升级：BRAT 设置 → **Check for updates**
+
+> BRAT 认的是**仓库的 Release**，读 `manifest.json` 里的版本号判断是否需要更新，所以每发布一版它都能发现。
+
+### 方式三：从源码构建
 
 1. 安装 [Node.js](https://nodejs.org/)（v18+）
 2. 克隆并构建：
@@ -155,8 +176,9 @@ foreach ($f in 'main.js','manifest.json','styles.css') {
 
 ### 更新已安装的版本
 
-覆盖 `main.js` / `manifest.json` / `styles.css` 三个文件，然后在 **设置 → 第三方插件** 里把
-Yuque Style 关掉再打开（或重启 Obsidian）就会加载新版本。
+覆盖 `main.js` / `manifest.json` / `styles.css` 三个文件（从 [Release 页面](https://github.com/chenchimi/yuque-style/releases/latest) 下载），
+然后在 **设置 → 第三方插件** 里把 Yuque Style 关掉再打开（或重启 Obsidian）就会加载新版本。
+若是用 BRAT 安装的，直接在 BRAT 面板检查更新即可，无需手动覆盖文件。
 
 设置、Token 与同步记录都保存在 `data.json`，更新不会丢；它不在仓库里，也不需要手动备份。
 
