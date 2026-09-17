@@ -12,7 +12,10 @@
     "isolatedModules": true,
     "strictNullChecks": true,
     "strict": true,
+    // tools/ 里的脚本用 `import fs from "fs"` 这种默认导入，需要互操作标志；
+    // 顺带把 tools 纳入类型检查——它们之前完全没被检查过，作用域写错只能等运行时炸
+    "esModuleInterop": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "tools/**/*.ts"]
 }

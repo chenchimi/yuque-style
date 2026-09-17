@@ -35,6 +35,28 @@
   color: var(--text-accent);
 }
 
+/* 文字颜色色板 */
+.yuque-color-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 6px 0 4px;
+}
+
+.yuque-color-swatch {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid var(--background-modifier-border);
+  cursor: pointer;
+}
+
+.yuque-color-swatch:hover {
+  border-color: var(--text-normal);
+  transform: scale(1.08);
+}
+
 /* ---------- 阅读模式：语雀式版式 ---------- */
 .markdown-preview-view.yuque-reader {
   max-width: var(--yuque-content-width, 820px);
@@ -74,120 +96,155 @@
   color: var(--text-accent);
 }
 
-/* 浮动目录 */
-.yuque-outline {
-  position: fixed;
-  top: 120px;
-  right: 24px;
-  width: 220px;
-  max-height: 60vh;
-  overflow-y: auto;
-  padding: 14px 16px;
-  background: var(--background-primary);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 10px;
-  box-shadow: var(--shadow-s);
-  z-index: 30;
+/* ---------- 语雀式排版细节（阅读模式 + 实时预览） ---------- */
+/* 两个容器的 DOM 完全不同：阅读模式是 .markdown-preview-view，
+   实时预览是 CodeMirror 的 .markdown-source-view（块级元素用 .cm-line / .HyperMD-* 表达）。
+   能用一个 CSS 变量统一的一律用变量，否则并列写两个选择器。 */
+
+/* 正文节奏：行高 1.75 + 段间距 1em。
+   语雀的「松快感」主要来自这两项，所以只动节奏、不动用户自己设的字号 */
+.markdown-preview-view.yuque-reader,
+.markdown-source-view.yuque-reader {
+  --line-height-normal: 1.75;
+  --p-spacing: 1em;
+  --h1-size: 1.6em;
+  --h2-size: 1.35em;
+  --h3-size: 1.15em;
 }
 
-.yuque-outline.yuque-outline-hidden {
-  display: none;
+/* 栏宽 */
+.markdown-preview-view.yuque-reader {
+  max-width: var(--yuque-content-width, 820px);
+  margin: 0 auto;
+  padding-left: 32px;
+  padding-right: 32px;
 }
 
-.yuque-outline-title {
-  margin-bottom: 10px;
-  font-size: 0.8em;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  color: var(--text-faint);
-  text-transform: uppercase;
+.markdown-source-view.yuque-reader .cm-sizer {
+  max-width: var(--yuque-content-width, 820px);
+  margin: 0 auto;
 }
 
-.yuque-outline-item {
-  display: block;
-  padding: 4px 0;
-  font-size: 0.85em;
-  color: var(--text-muted);
-  text-decoration: none;
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* 跟随窗口宽度（设置里可开）：
+   内外两层都要放开——外层是本插件设的 max-width，
+   内层是 Obsidian 自带「可读行宽」给内容层夹的限制 */
+.yuque-width-auto .markdown-preview-view.yuque-reader,
+.yuque-width-auto .markdown-preview-view.yuque-reader .markdown-preview-sizer,
+.yuque-width-auto .markdown-source-view.yuque-reader .cm-sizer,
+.yuque-width-auto .markdown-source-view.yuque-reader .cm-contentContainer {
+  max-width: none;
 }
 
-.yuque-outline-item:hover {
-  color: var(--text-accent);
+/* 标题一律靠左。
+   语雀的标题是左对齐的；有些主题/片段会把标题行或行内标题居中，这里显式压回去。 */
+.markdown-source-view .cm-line.HyperMD-header,
+.markdown-source-view .inline-title,
+.markdown-preview-view .inline-title {
+  text-align: left;
 }
 
-.yuque-outline-h2 {
-  padding-left: 14px;
+/* 含裸 HTML 的正文行还原成正常整宽。
+   Minimal 主题的 "Block widths" 把「直接含 iframe 或 .cm-html-embed 的块」当成嵌入块，
+   套上固定宽度（--container-iframe-width = --line-width）；而语雀同步下来的正文行
+   开头常是裸 HTML（`<span style="color:…">`），在 Obsidian 里就渲染成 .cm-html-embed，
+   于是被按嵌入块收窄。这里把它们还原成整宽（!important 是因为主题那条选择器权重很高）。
+   注意：这些行「被居中」是另一个原因（本插件的图片居中规则误伤了 CodeMirror 控件），
+   已经在上面的图片规则里修掉了，这条只负责宽度。 */
+.markdown-source-view.yuque-reader .cm-content > div:has(> .cm-html-embed),
+.markdown-preview-view.yuque-reader .markdown-preview-sizer > div:has(> .cm-html-embed) {
+  width: 100% !important;
+  max-width: none !important;
+  margin-inline: 0 !important;
+  text-align: left;
 }
 
-.yuque-outline-h3 {
-  padding-left: 28px;
-}
-
-@media (max-width: 1280px) {
-  .yuque-outline {
-    display: none;
-  }
-}
-
-/* ---------- 语雀式排版细节 ---------- */
+/* 标题：去掉 h1 的下划线（语雀没有那条线） */
 .markdown-preview-view.yuque-reader h1,
 .markdown-preview-view.yuque-reader h2,
-.markdown-preview-view.yuque-reader h3 {
+.markdown-preview-view.yuque-reader h3,
+.markdown-source-view.yuque-reader .HyperMD-header-1,
+.markdown-source-view.yuque-reader .HyperMD-header-2,
+.markdown-source-view.yuque-reader .HyperMD-header-3 {
   font-weight: 700;
-  margin-top: 1.6em;
-  margin-bottom: 0.6em;
+  border-bottom: none;
+  padding-bottom: 0;
 }
 
-.markdown-preview-view.yuque-reader h1 {
-  font-size: 1.6em;
-  border-bottom: 1px solid var(--background-modifier-border);
-  padding-bottom: 0.3em;
+/* 图片：圆角 + 限高，避免一张长图占满整屏 */
+.markdown-preview-view.yuque-reader img,
+.markdown-source-view.yuque-reader img {
+  max-width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  border-radius: 4px;
 }
 
-.markdown-preview-view.yuque-reader h2 {
-  font-size: 1.35em;
+/* 图片居中靠容器而不是改 img 的 display：
+   直接给 img 加 display:block 会破坏 CodeMirror 的行内布局，
+   也会让 Obsidian 写在 img 上的尺寸属性（![[图|600]]）失效 */
+.markdown-preview-view.yuque-reader p:has(> img),
+.markdown-preview-view.yuque-reader p:has(> .internal-embed),
+/* 实时预览里必须排除 CodeMirror 自己的控件：光标定位用的 widgetBuffer 也是 <img>，
+   而它几乎每行都有——不排除的话整行正文都会被判成「含图片」并被居中。 */
+.markdown-source-view.yuque-reader .cm-line:not(.HyperMD-header):has(> img:not([class*="cm-"])),
+.markdown-source-view.yuque-reader .cm-line:not(.HyperMD-header):has(> .internal-embed) {
+  text-align: center;
 }
 
-.markdown-preview-view.yuque-reader h3 {
-  font-size: 1.15em;
-}
-
-/* 引用块卡片化 */
+/* 引用块：语雀式——浅灰竖线 + 灰字 + 无背景
+   （原来的「主题色竖线 + 灰底 + 圆角」更像 Notion 的卡片，不是语雀） */
 .markdown-preview-view.yuque-reader blockquote {
   margin: 1em 0;
-  padding: 12px 16px;
-  border-left: 3px solid var(--interactive-accent);
-  border-radius: 6px;
-  background: var(--background-secondary);
+  padding: 2px 0 2px 16px;
+  border-left: 3px solid var(--background-modifier-border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.markdown-source-view.yuque-reader .HyperMD-quote {
+  padding-left: 16px;
+  border-left: 3px solid var(--background-modifier-border);
+  background: transparent;
   color: var(--text-muted);
 }
 
 /* Callout 卡片 */
-.markdown-preview-view.yuque-reader .callout {
+.markdown-preview-view.yuque-reader .callout,
+.markdown-source-view.yuque-reader .callout {
   border-radius: 10px;
   border: 1px solid var(--background-modifier-border);
   overflow: hidden;
 }
 
-/* 表格 */
-.markdown-preview-view.yuque-reader table {
+/* 表格：宽表格自己横向滚动，不再被压成一列几个字。
+   实测 Obsidian 阅读模式不会给表格滚动容器，而是把它压缩进栏宽；
+   两件事缺一个都不会出现滚动条：
+   1) 表格块级化 + overflow-x —— 让表格自己成为滚动容器
+   2) 单元格 nowrap —— 否则浏览器一直靠折行把表格塞进容器，内容永远不会溢出
+   代价：窄表格不再撑满栏宽（缩到内容宽度）；长段落单元格会让表格很宽、需要横向滚 */
+.markdown-preview-view.yuque-reader table,
+.markdown-source-view.yuque-reader table {
+  display: block;
   width: 100%;
+  overflow-x: auto;
+  scrollbar-width: thin;
   margin: 1.2em 0;
   border-collapse: collapse;
   font-size: 0.95em;
 }
 
 .markdown-preview-view.yuque-reader th,
-.markdown-preview-view.yuque-reader td {
+.markdown-preview-view.yuque-reader td,
+.markdown-source-view.yuque-reader th,
+.markdown-source-view.yuque-reader td {
   padding: 8px 12px;
   border: 1px solid var(--background-modifier-border);
+  white-space: nowrap;
 }
 
-.markdown-preview-view.yuque-reader th {
+.markdown-preview-view.yuque-reader th,
+.markdown-source-view.yuque-reader th {
   background: var(--background-secondary);
   font-weight: 600;
 }
@@ -205,10 +262,38 @@
   border-bottom-style: solid;
 }
 
+/* 行内代码：浅底 + 圆角 + 主题色（原来完全没有样式） */
+.markdown-preview-view.yuque-reader :not(pre) > code,
+.markdown-source-view.yuque-reader .cm-inline-code {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--background-secondary);
+  color: var(--text-accent);
+  font-size: 0.9em;
+}
+
 /* 代码块 */
 .markdown-preview-view.yuque-reader pre {
   border-radius: 10px;
   border: 1px solid var(--background-modifier-border);
+}
+
+/* 分割线 */
+.markdown-preview-view.yuque-reader hr {
+  margin: 2em 0;
+  border: none;
+  border-top: 1px solid var(--background-modifier-border);
+  background: transparent;
+}
+
+/* 列表节奏 */
+.markdown-preview-view.yuque-reader ul,
+.markdown-preview-view.yuque-reader ol {
+  margin: 0.6em 0 1em;
+}
+
+.markdown-preview-view.yuque-reader li {
+  margin: 0.2em 0;
 }
 
 /* 任务列表 */
@@ -217,9 +302,24 @@
   padding: 3px 0;
 }
 
-.markdown-preview-view.yuque-reader .task-list-item.is-checked {
+.markdown-preview-view.yuque-reader .task-list-item.is-checked,
+.markdown-source-view.yuque-reader .HyperMD-task-line[data-task="x"] {
   color: var(--text-faint);
   text-decoration: line-through;
+}
+
+/* 文档头：正文已有 h1 时不注入标题，此时收窄上下留白 */
+.yuque-doc-header.yuque-doc-header-no-title {
+  padding-top: 12px;
+  margin-bottom: 20px;
+}
+
+/* 窄屏：阅读栏内边距收窄 */
+@media (max-width: 900px) {
+  .markdown-preview-view.yuque-reader {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
 }
 
 /* ---------- 斜杠快捷菜单 ---------- */
@@ -283,6 +383,16 @@
   align-items: center;
   gap: 8px;
   padding: 4px 2px;
+}
+
+.yuque-repo-configured {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 0 6px;
+  white-space: nowrap;
 }
 
 .yuque-folder-input {
@@ -430,4 +540,11 @@
 
 .markdown-source-view.yuque-heading-num.yuque-heading-num-no-h1 .HyperMD-header-4 .cm-header-4::before {
   content: counter(yq-h2) "." counter(yq-h3) "." counter(yq-h4) " ";
+}
+
+/* 笔记属性全部隐藏（或「文档头信息」总开关关闭）时，整块属性面板一起收起。
+   否则 Obsidian 仍会画出容器本身，只剩一个「笔记属性」标题和「+ 添加笔记属性」按钮，
+   看着像没生效。类名由 main.ts 的 applyPropertyVisibility() 挂在 body 上。 */
+body.yuque-hide-all-props .metadata-container {
+  display: none;
 }

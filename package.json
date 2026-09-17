@@ -5,7 +5,10 @@
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "probe": "node tools/build-probe.mjs"
   },
   "keywords": [],
   "author": "chenxixi",
@@ -17,6 +20,7 @@
     "obsidian": "latest",
     "tslib": "2.6.3",
     "typescript": "^5.4.5",
-    "jsdom": "^24.0.0"
+    "jsdom": "^24.0.0",
+    "vitest": "^2.1.9"
   }
 }

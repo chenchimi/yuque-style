@@ -1,7 +1,7 @@
 {
   "id": "yuque-style",
   "name": "Yuque Style",
-  "version": "0.4.4",
+  "version": "0.6.9",
   "minAppVersion": "1.4.0",
   "description": "语雀风格的编辑与阅读体验 + 语雀文档同步到 Obsidian（保持语雀样式、目录结构与内部双链）。",
   "author": "yuque-style-dev",

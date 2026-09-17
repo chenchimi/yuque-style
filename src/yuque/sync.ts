@@ -1,6 +1,17 @@
-import { App, normalizePath, TFile } from "obsidian";
+import { App, normalizePath, TFile, TFolder } from "obsidian";
 import { YuqueApi, YuqueDocSummary, YuqueTocNode } from "./api";
-import { convertYuqueBody } from "./lake";
+import { convertYuqueBody, type ColorMode } from "./lake";
+import { propertiesBlock, FM, yuqueTagNames } from "./frontmatter";
+import { decideWrite, docUrl, hashContent, pickRelocateSource, stateKey } from "./state";
+import {
+  basenameOf,
+  buildInternalLink,
+  buildLinkIndex,
+  collectVaultDocs,
+  convertLinksInContent,
+  countBasenames,
+  mergeStateIntoIndex,
+} from "./link";
 import type { YuqueStylePlugin } from "../main";
 
 export type SyncLogFn = (msg: string, type?: "info" | "success" | "error") => void;
@@ -15,6 +26,39 @@ export function sanitizeFileName(name: string): string {
     .trim();
   if (!n) n = "未命名文档";
   return n;
+}
+
+/**
+ * 转义 Markdown 链接目标里的空格与定界符。
+ *
+ * 链接目标不带尖括号时不允许含空格，`![](../Docker 和 K8S/assets/x.png)` 会被整段
+ * 当成普通文本、图片根本不显示——只要目录名里有空格就必然踩到。
+ * 只编码真正会破坏解析的字符，中文保持原样以便阅读。
+ */
+const LINK_UNSAFE: Record<string, string> = {
+  " ": "%20",
+  "%": "%25",
+  "(": "%28",
+  ")": "%29",
+  "<": "%3C",
+  ">": "%3E",
+  "#": "%23",
+  "?": "%3F",
+};
+
+export function encodeLinkTarget(path: string): string {
+  return path.replace(/[ %()<>#?]/g, (ch) => LINK_UNSAFE[ch] ?? ch);
+}
+
+/** 在目标文件夹内按标题精确匹配文件（旧记录无 path 时的搬移定位），返回不带后缀的路径 */
+function findTitleMatches(app: App, folder: string, title: string): string[] {
+  const name = `${sanitizeFileName(title)}.md`;
+  const prefix = folder ? `${folder}/` : "";
+  return app.vault
+    .getMarkdownFiles()
+    .map((f) => f.path)
+    .filter((p) => p.startsWith(prefix) && (p === `${prefix}${name}` || p.endsWith(`/${name}`)))
+    .map((p) => p.slice(0, -3));
 }
 
 /** 递归创建文件夹（已存在则忽略） */
@@ -37,7 +81,11 @@ export async function ensureFolder(app: App, folder: string): Promise<void> {
 }
 
 function joinPath(...parts: string[]): string {
-  return parts.filter((p) => p && p.trim() && p !== "/" && p !== ".").join("/");
+  // 统一在此归一化：所有 vault 读写路径都由 joinPath 产出，
+  // 避免各处遗漏 normalizePath 导致双重斜杠或反斜杠写入
+  return normalizePath(
+    parts.filter((p) => p && p.trim() && p !== "/" && p !== ".").join("/"),
+  );
 }
 
 /** 由 TOC 构建 slug → 所在文件夹路径（含父级 TITLE 节点形成的层级） */
@@ -84,14 +132,10 @@ function imageExtFromUrl(url: string): string {
   return "png";
 }
 
-/** 生成 YAML frontmatter */
-function buildFrontmatter(fields: Record<string, string>): string {
-  const lines = Object.entries(fields)
-    .filter(([, v]) => v)
-    .map(([k, v]) => `${k}: ${v.replace(/"/g, '\\"')}`);
-  if (lines.length === 0) return "";
-  return `---\n${lines.join("\n")}\n---\n`;
-}
+// 前言区的生成（buildFrontmatter / docPropertiesBlock）定义在 ./frontmatter：
+// 同步写入、补齐命令与离线探针共用同一份实现，避免三处各抄一遍而漂移
+
+
 
 interface StagedDoc {
   slug: string;
@@ -103,15 +147,63 @@ interface StagedDoc {
   warnings: string[];
 }
 
+/** 冲突备份根目录（点开头，Obsidian 不会将其索引为笔记） */
+const BACKUP_ROOT = ".yuque-backups";
+/** 每篇文档保留的备份份数上限，避免备份无限堆积 */
+const BACKUP_KEEP = 5;
+
+function backupTimestamp(d: Date): string {
+  const p = (n: number, w = 2) => String(n).padStart(w, "0");
+  return (
+    `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
+    `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}` +
+    `-${p(d.getMilliseconds(), 3)}`
+  );
+}
+
+/** 备份本地现有内容并清理超限的旧备份，返回备份文件路径 */
+async function backupDocFile(
+  app: App,
+  ns: string,
+  doc: StagedDoc,
+  content: string,
+): Promise<string> {
+  const dir = joinPath(BACKUP_ROOT, ns, doc.slug);
+  await ensureFolder(app, dir);
+  const name = `${backupTimestamp(new Date())}__${sanitizeFileName(doc.title).slice(0, 60)}.md`;
+  const path = joinPath(dir, name);
+  await app.vault.create(path, content);
+  await pruneBackups(app, dir);
+  return path;
+}
+
+/** 只保留最近 BACKUP_KEEP 份备份 */
+async function pruneBackups(app: App, dir: string): Promise<void> {
+  const folder = app.vault.getAbstractFileByPath(dir);
+  if (!(folder instanceof TFolder)) return;
+  const files = folder.children.filter((f): f is TFile => f instanceof TFile);
+  if (files.length <= BACKUP_KEEP) return;
+  // 文件名以时间戳开头，字典序即时间序
+  files.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const f of files.slice(0, files.length - BACKUP_KEEP)) {
+    try {
+      await app.vault.delete(f);
+    } catch {
+      // 删除失败不影响主流程
+    }
+  }
+}
+
 /**
  * 同步单个任务：拉取文档 → Lake 转 Markdown → 内链改写 → 图片本地化 → 写入 vault。
- * 增量策略：settings.yuqueSyncState 中记录的 updated_at 与列表一致且本地文件存在则跳过。
+ * 增量策略：settings.yuqueSyncState 中记录的 updatedAt 与列表一致、且记录的本地文件仍存在则跳过。
  */
 export async function syncTask(
   plugin: YuqueStylePlugin,
   api: YuqueApi,
   task: YuqueSyncTaskType,
   log: SyncLogFn,
+  signal?: AbortSignal,
 ): Promise<void> {
   const settings = plugin.settings;
   const ns = task.namespace;
@@ -213,41 +305,78 @@ export async function syncTask(
 
   // 增量过滤
   const state = settings.yuqueSyncState || {};
-  const pending: YuqueDocSummary[] = [];
+  // 落盘必须随时可做：中断或异常时若丢掉已写入文件的 hash，
+  // 下次它们会被判成「本地被改过」而白白触发一次保守备份
+  const persistState = async (): Promise<void> => {
+    settings.yuqueSyncState = state;
+    await plugin.saveSettings();
+  };
+  // 语雀彩色文字落到 Markdown 的方式；默认 drop（不输出 HTML，编辑/阅读两种模式都不见源码）
+  const colorMode: ColorMode = settings.yuqueTextColor || "drop";
+  // 连解析出的本地路径一起带下去：写入阶段必须复用它。
+  // 否则用户重命名后会被按「目标文件夹 + 标题」重新算回旧路径，又建出一份重复文件。
+  const pending: { doc: YuqueDocSummary; basePath: string }[] = [];
   let skipped = 0;
   for (const d of targets) {
-    const key = `${ns}/${d.slug}`;
-    const basePath = joinPath(
-      task.targetFolder,
-      tocFolders.get(d.slug) || "",
-      sanitizeFileName(d.title),
-    );
-    const file = plugin.app.vault.getAbstractFileByPath(`${basePath}.md`);
-    if (state[key] === d.updated_at && file instanceof TFile) {
+    const key = stateKey(ns, d.slug);
+    const rec = state[key];
+    // 优先沿用 state 记录的真实路径；旧记录迁移后 path 为空、或文件已不在原处时，
+    // 回退到按 TOC + 标题现算的路径（旧行为）
+    let resolvedPath = rec?.path || "";
+    let file = resolvedPath
+      ? plugin.app.vault.getAbstractFileByPath(`${resolvedPath}.md`)
+      : null;
+    if (!(file instanceof TFile)) {
+      resolvedPath = joinPath(
+        task.targetFolder,
+        tocFolders.get(d.slug) || "",
+        sanitizeFileName(d.title),
+      );
+      file = plugin.app.vault.getAbstractFileByPath(`${resolvedPath}.md`);
+    }
+    if (rec && rec.updatedAt === d.updated_at && file instanceof TFile) {
+      // 顺带把补全/校正后的路径与地址写回，旧记录首次同步即自愈
+      state[key] = {
+        updatedAt: rec.updatedAt,
+        path: resolvedPath,
+        url: rec.url || docUrl(ns, d.slug),
+        title: d.title,
+        // 本次未写入，指纹必须沿用原值，否则会误判为「本地被改过」
+        hash: rec.hash,
+      };
       skipped++;
       continue;
     }
-    pending.push(d);
+    pending.push({ doc: d, basePath: resolvedPath });
   }
   log(`共 ${targets.length} 篇，需更新 ${pending.length} 篇，跳过未变化 ${skipped} 篇`);
 
   // 拉取并转换
   const staged: StagedDoc[] = [];
-  for (const d of pending) {
+  for (const { doc: d, basePath } of pending) {
+    if (signal?.aborted) {
+      log("已停止；正在保存已同步记录…");
+      await persistState();
+      return;
+    }
     try {
       const detail = await api.getDoc(ns, d.slug);
-      const result = convertYuqueBody(detail.body || "");
-      const folder = joinPath(task.targetFolder, tocFolders.get(d.slug) || "");
-      const frontmatter = buildFrontmatter({
-        title: detail.title,
-        source: `https://www.yuque.com/${ns}/${d.slug}`,
-        yuque_updated_at: detail.updated_at,
+      const result = convertYuqueBody(detail.body || "", colorMode);
+      // 键名统一中文（见 frontmatter.ts 的 FM）：Obsidian 属性面板直接显示键名
+      const head = propertiesBlock({
+        [FM.title]: detail.title,
+        [FM.source]: `https://www.yuque.com/${ns}/${d.slug}`,
+        // 文档 ID 与创建时间：详情接口与列表接口都带，列表项作回退
+        [FM.id]: String(detail.id ?? d.id ?? ""),
+        [FM.createdAt]: detail.created_at || d.created_at || "",
+        [FM.updatedAt]: detail.updated_at,
+        [FM.tags]: yuqueTagNames(detail.tags),
       });
       staged.push({
         slug: d.slug,
         title: detail.title || d.title,
-        basePath: joinPath(folder, sanitizeFileName(detail.title || d.title)),
-        content: frontmatter + "\n" + result.markdown,
+        basePath,
+        content: head + result.markdown,
         updated_at: d.updated_at,
         warnings: result.warnings,
       });
@@ -258,23 +387,41 @@ export async function syncTask(
   }
   if (staged.length === 0) {
     log("没有需要写入的文档", "info");
+    // 仍需落盘：增量跳过时可能刚为旧记录补全了 path，
+    // 不能因为本次没有文件写入就把这份自愈结果丢掉
+    await persistState();
     return;
   }
 
-  // 内部链接 → Obsidian 双链（同知识库内指向已同步文档）
+  // 内部链接 → Obsidian 双链。
+  // 解析范围是整个 vault（语雀里跨知识库引用很常见），映射表来自每篇文档 frontmatter 的
+  // source 字段并上同步记录——故意不依赖同步状态，否则「清除增量同步记录」后表会全空。
   const slugToTitle = new Map<string, string>();
   for (const t of targets) slugToTitle.set(t.slug, sanitizeFileName(t.title));
+  const vaultDocs = collectVaultDocs(plugin.app);
+  const linkIndex = buildLinkIndex(vaultDocs);
+  mergeStateIntoIndex(linkIndex, settings.yuqueSyncState);
+  const extraNames: string[] = [];
+  // 本次要写入的文档也进索引：首次同步时 A→B 的引用同样能转（B 此刻还没落盘）
+  for (const { doc: pendingDoc, basePath } of pending) {
+    const key = stateKey(ns, pendingDoc.slug);
+    if (linkIndex.has(key)) continue;
+    const base = basenameOf(basePath);
+    linkIndex.set(key, { path: basePath, basename: base });
+    extraNames.push(base);
+  }
+  const linkCounts = countBasenames([
+    ...vaultDocs.map((d) => basenameOf(d.path)),
+    ...extraNames,
+  ]);
+  let linksConverted = 0;
   for (const doc of staged) {
-    doc.content = doc.content.replace(
-      /\[([^\]]*)\]\(https?:\/\/(?:www\.)?yuque\.com\/([^)\s/]+)\/([^)\s/?"#]+)[^)]*\)/g,
-      (full, text, linkNs, linkSlug) => {
-        if (linkNs === ns && slugToTitle.has(linkSlug) && targets.some((t) => t.slug === linkSlug)) {
-          const target = slugToTitle.get(linkSlug)!;
-          return text && text !== target ? `[[${target}|${text}]]` : `[[${target}]]`;
-        }
-        return full;
-      },
-    );
+    const converted = convertLinksInContent(doc.content, linkIndex, linkCounts);
+    doc.content = converted.content;
+    linksConverted += converted.converted;
+  }
+  if (linksConverted > 0) {
+    log(`已把 ${linksConverted} 条语雀文档链接转为本地双链`);
   }
 
   // 图片本地化
@@ -305,7 +452,9 @@ export async function syncTask(
             rel = "../".repeat(up) + assetsRoot;
           }
           rel = normalizePath(rel) + "/" + fileName;
-          doc.content = doc.content.split(full).join(`![${alt}](${rel})`);
+          doc.content = doc.content
+            .split(full)
+            .join(`![${alt}](${encodeLinkTarget(rel)})`);
           done++;
         } catch (e) {
           log(`  ⚠ 图片下载失败（保留远程链接）：${(e as Error).message}`, "error");
@@ -317,27 +466,99 @@ export async function syncTask(
 
   // 写入文件
   let written = 0;
+  let unchanged = 0;
+  let backedUp = 0;
+  let moved = 0;
   for (const doc of staged) {
+    if (signal?.aborted) {
+      log(`已停止；已写入 ${written} 篇，正在保存记录…`);
+      await persistState();
+      return;
+    }
     const filePath = `${doc.basePath}.md`;
     try {
       if (doc.basePath.includes("/")) {
         await ensureFolder(plugin.app, doc.basePath.slice(0, doc.basePath.lastIndexOf("/")));
       }
+      const key = stateKey(ns, doc.slug);
+      const rec = state[key];
+      if (!plugin.app.vault.getAbstractFileByPath(filePath)) {
+        // 目标位置没有文件：若旧位置（state 记录，或旧记录无 path 时按标题唯一匹配）
+        // 找得到文件，整体搬移过去——语雀端的目录调整不应该产生两份拷贝
+        const titleMatches = rec?.path
+          ? []
+          : findTitleMatches(plugin.app, task.targetFolder, doc.title);
+        const from = pickRelocateSource(rec?.path || "", doc.basePath, titleMatches);
+        if (from && from !== doc.basePath) {
+          const stale = plugin.app.vault.getAbstractFileByPath(`${from}.md`);
+          if (stale instanceof TFile) {
+            await plugin.app.vault.rename(stale, filePath);
+            log(`「${doc.title}」位置跟随语雀目录：${from} → ${doc.basePath}`);
+            moved++;
+          }
+        }
+      } else {
+        // 目标位置已有文件：检查别处是否还留着同名旧拷贝（记录指向的、或按标题匹配到的），
+        // 有则提示人工处理，绝不自动删除用户文件
+        const others =
+          rec?.path && rec.path !== doc.basePath
+            ? [rec.path]
+            : findTitleMatches(plugin.app, task.targetFolder, doc.title).filter(
+                (p) => p !== doc.basePath,
+              );
+        const leftover = others.find(
+          (p) => plugin.app.vault.getAbstractFileByPath(`${p}.md`) instanceof TFile,
+        );
+        if (leftover) {
+          log(
+            `  ⚠ 疑似重复：「${doc.title}」已在 ${doc.basePath} 更新，旧文件仍在 ${leftover}.md，请确认后手动删除`,
+            "error",
+          );
+        }
+      }
       const existing = plugin.app.vault.getAbstractFileByPath(filePath);
-      if (existing instanceof TFile) {
-        await plugin.app.vault.modify(existing, doc.content);
+      const existingFile = existing instanceof TFile ? existing : null;
+      const current = existingFile ? await plugin.app.vault.read(existingFile) : null;
+      const decision = decideWrite({
+        exists: existingFile !== null,
+        currentContent: current,
+        nextContent: doc.content,
+        knownHash: state[key]?.hash,
+      });
+      if (decision === "backup-overwrite" && settings.yuqueBackupOnConflict) {
+        const backupPath = await backupDocFile(plugin.app, ns, doc, current ?? "");
+        log(`「${doc.title}」本地已改动，备份原内容 → ${backupPath}`);
+        backedUp++;
+      }
+      if (decision === "skip-identical") {
+        // 内容一致，不写入也能把记录补齐，顺带省掉一次无意义的 modify
+        unchanged++;
+      } else if (existingFile) {
+        await plugin.app.vault.modify(existingFile, doc.content);
+        written++;
       } else {
         await plugin.app.vault.create(filePath, doc.content);
+        written++;
       }
-      state[`${ns}/${doc.slug}`] = doc.updated_at;
-      written++;
+      state[key] = {
+        updatedAt: doc.updated_at,
+        path: doc.basePath,
+        url: docUrl(ns, doc.slug),
+        title: doc.title,
+        hash: hashContent(doc.content),
+      };
     } catch (e) {
       log(`写入失败「${doc.title}」：${(e as Error).message}`, "error");
     }
   }
-  settings.yuqueSyncState = state;
-  await plugin.saveSettings();
-  log(`「${task.repoName}」完成：写入/更新 ${written} 篇`, "success");
+  await persistState();
+  log(
+    `「${task.repoName}」完成：写入/更新 ${written} 篇` +
+      (unchanged > 0 ? `，内容未变 ${unchanged} 篇` : "") +
+      (moved > 0 ? `，位置跟随 ${moved} 篇` : "") +
+      (backedUp > 0 ? `，冲突备份 ${backedUp} 篇` : ""),
+    "success",
+  );
 
   // 生成/更新「知识库目录」索引页：按语雀目录树的原始顺序，带层级缩进与双链
   if (toc.length > 0 && task.mode === "all") {
@@ -359,15 +580,20 @@ export async function syncTask(
         }
         const indent = "  ".repeat(depth);
         if (n.type === "DOC" && n.slug && slugToTitle.has(n.slug)) {
-          lines.push(`${indent}- [[${slugToTitle.get(n.slug)}|${n.title}]]`);
+          // 索引页点击最频繁，重名坑同样要按「唯一用短、撞车用路径」处理
+          const base = slugToTitle.get(n.slug)!;
+          const target = linkIndex.get(stateKey(ns, n.slug)) ?? { path: "", basename: base };
+          const unique = (linkCounts.get(target.basename) ?? 0) <= 1;
+          lines.push(`${indent}- ${buildInternalLink(target, n.title, unique)}`);
         } else if (n.title) {
           lines.push(`${indent}- **${n.title}**`);
         }
       }
-      const indexContent = buildFrontmatter({
-        title: `${task.repoName} 知识库目录`,
-        source: `https://www.yuque.com/${ns}`,
-      }) + `\n${lines.join("\n")}\n`;
+      const indexContent =
+        propertiesBlock({
+          [FM.title]: `${task.repoName} 知识库目录`,
+          [FM.source]: `https://www.yuque.com/${ns}`,
+        }) + `${lines.join("\n")}\n`;
       const indexPath = joinPath(task.targetFolder, `${sanitizeFileName(task.repoName)} 目录.md`);
       if (indexPath.includes("/")) {
         await ensureFolder(plugin.app, indexPath.slice(0, indexPath.lastIndexOf("/")));
@@ -385,24 +611,37 @@ export async function syncTask(
   }
 }
 
-/** 同步全部任务 */
+/**
+ * 同步任务。给定 tasks 时只跑这批（按给定顺序），否则跑设置里的全部任务。
+ * signal 供「停止」按钮使用：中断时 syncTask 会先把已写入文档的 state 落盘再退出，
+ * 已完成的文档不会丢 hash 基准；未开始的任务直接跳过。
+ */
 export async function syncAllTasks(
   plugin: YuqueStylePlugin,
   log: SyncLogFn,
+  tasks?: YuqueSyncTaskType[],
+  signal?: AbortSignal,
 ): Promise<void> {
   const settings = plugin.settings;
   if (!settings.yuqueToken) {
     log("请先在插件设置中填写语雀 Token", "error");
     return;
   }
-  if (!settings.yuqueTasks || settings.yuqueTasks.length === 0) {
+  const list = tasks && tasks.length > 0 ? tasks : settings.yuqueTasks || [];
+  if (list.length === 0) {
     log("还没有同步任务，请先在设置或用「添加语雀同步任务」命令创建", "error");
     return;
   }
   const api = new YuqueApi(settings.yuqueToken);
-  for (const task of settings.yuqueTasks) {
+  for (let i = 0; i < list.length; i++) {
+    const task = list[i];
+    if (signal?.aborted) {
+      log("已停止，余下任务不再执行", "info");
+      return;
+    }
+    if (list.length > 1) log(`—— [${i + 1}/${list.length}] 「${task.repoName}」——`);
     try {
-      await syncTask(plugin, api, task, log);
+      await syncTask(plugin, api, task, log, signal);
     } catch (e) {
       log(`任务「${task.repoName}」失败：${(e as Error).message}`, "error");
     }
@@ -418,3 +657,25 @@ export type YuqueSyncTaskType = {
   mode: "all" | "selected";
   selectedDocs: { slug: string; title: string }[];
 };
+
+/**
+ * 计算一批知识库各自的目标文件夹：根文件夹 / 库名。
+ * 库名 sanitize 后若与前面的库撞车（语雀允许同名库），给后者补 namespace 短后缀，
+ * 避免两个任务落到同一目录——同目录会让跨库同名文档互相误判成「自己的旧位置」。
+ */
+export function resolveTargetFolders(
+  repos: { namespace: string; name: string }[],
+  root: string,
+): { namespace: string; folder: string }[] {
+  const rootTrim = (root || "").trim().replace(/^\/+|\/+$/g, "");
+  const used = new Set<string>();
+  return repos.map((r) => {
+    let name = sanitizeFileName(r.name) || "未命名";
+    if (used.has(name)) {
+      const suffix = r.namespace.split("/")[1] || r.namespace;
+      name = `${name} (${suffix})`;
+    }
+    used.add(name);
+    return { namespace: r.namespace, folder: rootTrim ? `${rootTrim}/${name}` : name };
+  });
+}

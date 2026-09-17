@@ -70,8 +70,18 @@ function escapeTableCell(text: string): string {
   return text.replace(/\|/g, "\\|").replace(/\n/g, "<br>");
 }
 
+/**
+ * 语雀「文字颜色」落成什么：
+ * - `drop`（默认）：纯文本。实时预览不渲染内联 HTML，只有不输出 HTML 才能做到两种模式都不见源码
+ * - `highlight`：转成 `==文字==`，两种模式都能渲染，代价是颜色信息变成「高亮」
+ * - `keep`：保留 `<span style="color:...">`，阅读模式能渲染成颜色，但实时预览会看到源码
+ */
+export type ColorMode = "drop" | "highlight" | "keep";
+
 class LakeConverter {
   warnings = new Set<string>();
+
+  constructor(private colorMode: ColorMode = "keep") {}
 
   private parser = new DOMParser();
 
@@ -539,11 +549,20 @@ class LakeConverter {
         case "ne-span":
         case "div":
         case "font": {
-          const style = (child.getAttribute("style") || "").toLowerCase();
-          if (style.includes("background-color") || style.includes("background:")) {
-            out += `==${this.convertInline(child)}==`;
+          const style = child.getAttribute("style") || "";
+          const inner = this.convertInline(child);
+          const lower = style.toLowerCase();
+          // 背景色 → 高亮（Obsidian 原生语法，两种模式都渲染）
+          if (lower.includes("background-color") || lower.includes("background:")) {
+            out += `==${inner}==`;
+          } else if (isDefaultColor(style)) {
+            out += inner;
+          } else if (this.colorMode === "keep" && colorValueOf(style)) {
+            out += `<span style="color:${colorValueOf(style)}">${inner}</span>`;
+          } else if (this.colorMode === "highlight") {
+            out += `==${inner}==`;
           } else {
-            out += this.convertInline(child);
+            out += inner;
           }
           break;
         }
@@ -572,9 +591,9 @@ class LakeConverter {
 }
 
 /** Lake → Markdown 主入口 */
-export function lakeToMarkdown(lake: string): LakeConvertResult {
+export function lakeToMarkdown(lake: string, colorMode: ColorMode = "keep"): LakeConvertResult {
   if (!lake || !lake.trim()) return { markdown: "", warnings: [] };
-  return new LakeConverter().convert(lake);
+  return new LakeConverter(colorMode).convert(lake);
 }
 
 /**
@@ -600,18 +619,144 @@ export function isLakeBody(body: string): boolean {
   return false;
 }
 
-/** 黑色（默认前景色）判断 */
+/**
+ * 取 style 里的前景色值（`color:` 而不是 `background-color:`）。
+ * 正则要求 color 紧跟行首或分号，所以 background-color 不会误命中。
+ */
+function colorValueOf(style: string): string {
+  const m = style.match(/(?:^|;)\s*color\s*:\s*([^;"']+)/i);
+  return m ? m[1].trim() : "";
+}
+
+/** 取出 style 里的 rgb 三元组（没有则 null） */
+function rgbOf(style: string): [number, number, number] | null {
+  const m = style.match(/rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/i);
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+/**
+ * 语雀自己的默认文字颜色：正文 #4D4D4D（77,77,77）、标题 #4F4F4F（79,79,79），
+ * 外加粘贴产物里的纯黑。这些颜色等于主题的默认文字色，包成 span 没有任何视觉信息，
+ * 只会让正文到处是 `<span style="color:...">` 噪声（实时预览下还直接显示成源码）。
+ *
+ * 当初只判了纯黑，于是语雀默认灰被判成「用户选过的颜色」，整篇文档被逐段包上 span。
+ */
+const DEFAULT_TEXT_RGB: ReadonlyArray<readonly [number, number, number]> = [
+  [0, 0, 0],
+  [77, 77, 77],
+  [79, 79, 79],
+];
+
+/** 判断是否是「默认前景色 / 没写颜色」（是则不值得输出成 span） */
 function isDefaultColor(style: string): boolean {
-  return /rgb\(\s*0\s*,\s*0\s*,\s*0\s*\)/i.test(style) || !/color/i.test(style);
+  if (!/color/i.test(style)) return true;
+  const rgb = rgbOf(style);
+  if (!rgb) return false;
+  return DEFAULT_TEXT_RGB.some(([r, g, b]) => r === rgb[0] && g === rgb[1] && b === rgb[2]);
+}
+
+/**
+ * 去掉 `style="color:..."` span 的包裹（本地清理存量文档用）。
+ *
+ * `defaultOnly`（默认 true）只解包「等于主题默认色」那些——它们本来就看不出差别；
+ * 设为 false 时连真正有颜色的 span 一起解掉（配合设置里「文字颜色 = 不输出」）。
+ * 背景色 span（`==高亮==` 靠它）一律不动；非本插件格式的 span（无 style）也不碰。
+ *
+ * 用平衡扫描找配对的 `</span>` 而不是正则到第一个 `</span>`——否则遇到嵌套时
+ * 会把后半段文字并进那个彩色 span 里，把颜色改错。
+ */
+export function stripColorSpans(
+  md: string,
+  opts: { defaultOnly?: boolean } = {},
+): { markdown: string; removed: number } {
+  const defaultOnly = opts.defaultOnly !== false;
+  let out = md;
+  let removed = 0;
+  // 每轮解掉当前最外层的目标 span；解完外层后内层可能才暴露出来，所以跑多轮
+  for (let pass = 0; pass < 10; pass++) {
+    const { text, count } = stripOnePass(out, defaultOnly);
+    out = text;
+    removed += count;
+    if (count === 0) break;
+  }
+  return { markdown: out, removed };
+}
+
+/** 只解默认色包裹（`文字颜色` 设为「保留颜色」时的清理口径） */
+export function stripDefaultColorSpans(md: string): { markdown: string; removed: number } {
+  return stripColorSpans(md, { defaultOnly: true });
+}
+
+/** 找与 s[open] 处 `<span` 配对的 `</span>` 起始下标（平衡嵌套；找不到返回 -1） */
+function findMatchingClose(s: string, open: number): number {
+  let depth = 0;
+  let i = open;
+  while (i < s.length) {
+    const nextOpen = s.indexOf("<span", i);
+    const nextClose = s.indexOf("</span>", i);
+    if (nextClose < 0) return -1;
+    if (nextOpen >= 0 && nextOpen < nextClose) {
+      depth++;
+      i = nextOpen + 5;
+      continue;
+    }
+    // 先遇到闭标签：层级减一，减到 0 就是与 open 配对的那一个
+    depth--;
+    if (depth === 0) return nextClose;
+    i = nextClose + 7;
+  }
+  return -1;
+}
+
+function stripOnePass(md: string, defaultOnly: boolean): { text: string; count: number } {
+  let out = "";
+  let i = 0;
+  let count = 0;
+
+  while (i < md.length) {
+    const open = md.indexOf("<span", i);
+    if (open < 0) {
+      out += md.slice(i);
+      break;
+    }
+    const tagEnd = md.indexOf(">", open);
+    if (tagEnd < 0) {
+      out += md.slice(i);
+      break;
+    }
+    const tag = md.slice(open, tagEnd + 1);
+    // 只处理本插件生成的 `<span style="...">`，别人的 span 一律不碰
+    const styleMatch = tag.match(/^<span\s+style="([^"]*)"\s*>$/i);
+    const style = styleMatch ? styleMatch[1] : "";
+    const close = styleMatch ? findMatchingClose(md, open) : -1;
+    const keep =
+      !styleMatch ||
+      close < 0 ||
+      style.toLowerCase().includes("background") ||
+      (defaultOnly ? !isDefaultColor(style) : !colorValueOf(style));
+
+    if (keep) {
+      out += md.slice(i, tagEnd + 1);
+      i = tagEnd + 1;
+      continue;
+    }
+    // 默认色：丢掉这一层标签，内部内容原样留下（内层会在下一轮被处理）
+    out += md.slice(i, open) + md.slice(tagEnd + 1, close);
+    count++;
+    i = close + "</span>".length;
+  }
+
+  return { text: out, count };
 }
 
 /**
  * 清理语雀返回的 Markdown 正文：
- * - 解包黑色 <font style="color:rgb(0,0,0)">（粘贴产物，无意义）
- * - 非黑色保留为 <span style="color:...">（Obsidian 可渲染）
+ * - 解包默认色 <font>（纯黑，以及语雀自己的正文 #4D4D4D / 标题 #4F4F4F——它们等于主题默认色）
+ * - 非默认色按 colorMode 处理：drop 丢弃 / highlight 转 `==` / keep 保留为 `<span style="color:...">`
  * - 收敛多余空行
  */
-export function cleanMarkdownBody(md: string): LakeConvertResult {
+export function cleanMarkdownBody(md: string, colorMode: ColorMode = "keep"): LakeConvertResult {
   const warnings: string[] = [];
   let out = md;
   // 迭代解包，防嵌套 font
@@ -620,6 +765,8 @@ export function cleanMarkdownBody(md: string): LakeConvertResult {
       /<font([^>]*)>([\s\S]*?)<\/font>/gi,
       (_m, attrs: string, inner: string) => {
         if (isDefaultColor(attrs)) return inner;
+        if (colorMode === "drop") return inner;
+        if (colorMode === "highlight") return `==${inner}==`;
         const colorMatch = attrs.match(/color:\s*([^;"']+)/i);
         const color = colorMatch ? colorMatch[1].trim() : "";
         return color ? `<span style="color:${color}">${inner}</span>` : inner;
@@ -638,7 +785,7 @@ export function cleanMarkdownBody(md: string): LakeConvertResult {
 }
 
 /** 统一入口：按内容特征分流 Lake / Markdown */
-export function convertYuqueBody(body: string): LakeConvertResult {
+export function convertYuqueBody(body: string, colorMode: ColorMode = "keep"): LakeConvertResult {
   if (!body || !body.trim()) return { markdown: "", warnings: [] };
-  return isLakeBody(body) ? lakeToMarkdown(body) : cleanMarkdownBody(body);
+  return isLakeBody(body) ? lakeToMarkdown(body, colorMode) : cleanMarkdownBody(body, colorMode);
 }

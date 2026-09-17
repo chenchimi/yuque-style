@@ -24,6 +24,11 @@ export interface YuqueDocSummary {
 export interface YuqueDocDetail extends YuqueDocSummary {
   body: string;
   description?: string;
+  /**
+   * 语雀标签。实测（全库 1964 篇补齐元数据、无一篇拿到标签）该接口不返回此字段，
+   * 保留声明只为「哪天语雀提供了能自动生效」，读取端一律按「可能为空」处理。
+   */
+  tags?: { name?: string; title?: string }[];
 }
 
 export interface YuqueTocNode {
