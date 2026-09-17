@@ -2,7 +2,7 @@
 
 模仿语雀文档编辑、查看体验的 Obsidian 插件，并支持把语雀知识库一键同步到 Obsidian。
 
-仓库：<https://github.com/chenchimi/yuque-style>　·　当前版本：**[v0.6.9](https://github.com/chenchimi/yuque-style/releases/tag/0.6.9)**
+仓库：<https://github.com/chenchimi/yuque-style>　·　当前版本：**[v0.7.0](https://github.com/chenchimi/yuque-style/releases/tag/0.7.0)**
 
 ## 功能总览
 
@@ -21,6 +21,7 @@
 
 - **增量同步**：按语雀 `updated_at` 只拉取变化的文档；可「清除增量同步记录」强制全量
 - **目录还原**：按目录树建文件夹层级，按语雀原始顺序同步，生成「XX 目录.md」索引页（树状缩进 + 双链）
+- **目录跟随**：语雀端给分组改名或挪动位置后，下次同步会把本地文件夹一起改名（正文没变则只移动文件、不重新下载）；你**自己在本地改过的目录名与文件名不会被覆盖**
 - **图片本地化**：默认开启，图片下载到 `assets/`（可关闭）
 - **内部链接**：文档间引用转 `[[双链]]`，跨库也认；文件名唯一写 `[[标题]]`，撞车才用 `[[完整路径|显示文本]]`；附件与未同步目标保持原样
 - **来源追踪**：frontmatter 记录 `source`（原文链接）与更新时间
@@ -50,6 +51,7 @@
 - **文档接口不返回标签**：「语雀标签」不会被写入；读取逻辑保留，接口提供后自动生效
 - **「笔记属性」只控显示、不动数据**：隐藏只影响顶部属性面板，文档头 / 双链索引 / Dataview 与搜索照旧可读；源码模式仍会看到 YAML 原文，对其它插件也可见。Obsidian 自带的「文档中的属性」为**全局**设置，设「隐藏」时逐个开关不再有意义
 - 同步为单向（语雀 → Obsidian），本地修改会被下次同步覆盖
+- **目录跟随以同步记录为准**：执行过「清除增量同步记录」后，需要先全量同步一轮把分组信息记下来，之后语雀端的目录改动才会自动跟随
 - 语雀中删除的文档不会自动删除本地文件（保守策略）
 - 免费账户 API 配额较低，频繁全量同步可能触发限流（等待 10-60 分钟自动恢复）
 
@@ -103,9 +105,9 @@
 
 **推荐用 Release 附件**——链接固定在这一版，不受 `main` 分支改动影响（也可直接打开 [Release 页面](https://github.com/chenchimi/yuque-style/releases/latest) 下载附件）：
 
-[main.js](https://github.com/chenchimi/yuque-style/releases/download/0.6.9/main.js) ·
-[manifest.json](https://github.com/chenchimi/yuque-style/releases/download/0.6.9/manifest.json) ·
-[styles.css](https://github.com/chenchimi/yuque-style/releases/download/0.6.9/styles.css)
+[main.js](https://github.com/chenchimi/yuque-style/releases/download/0.7.0/main.js) ·
+[manifest.json](https://github.com/chenchimi/yuque-style/releases/download/0.7.0/manifest.json) ·
+[styles.css](https://github.com/chenchimi/yuque-style/releases/download/0.7.0/styles.css)
 
 命令行一次到位（PowerShell，把第一行的路径换成你自己的仓库）：
 
@@ -164,7 +166,7 @@ foreach ($f in 'main.js','manifest.json','styles.css') {
 ```bash
 npm run dev        # watch 模式，改代码自动重新构建
 npm run build      # 类型检查（含 tools/）+ 产物构建
-npm test           # 全部单测（vitest，260+ 个用例）
+npm test           # 全部单测（vitest，290+ 个用例）
 npm run probe      # 打包 tools/ 下的离线探针（体检 / 配额盘点 / 失联文件诊断）
 ```
 
@@ -176,15 +178,16 @@ npm run probe      # 打包 tools/ 下的离线探针（体检 / 配额盘点 / 
 
 - 基于 Obsidian 官方插件 API + CodeMirror 6 扩展机制
 - 工具栏通过 `registerEditorExtension` 注册 `ViewPlugin`，随选区定位，按上下文切换「文本排版条 / 表格工具条」
-- 纯逻辑抽成不依赖 Obsidian 的模块以便单测：`src/table.ts`（表格行列操作）、`src/toc.ts`（目录块生成）、`src/slash-items.ts`（菜单条目与过滤）
+- 纯逻辑抽成不依赖 Obsidian 的模块以便单测：`src/table.ts`（表格行列操作）、`src/toc.ts`（目录块生成）、`src/slash-items.ts`（菜单条目与过滤）、`src/yuque/state.ts`（同步记录，以及「文件/目录跟随」的判定）
 - 斜杠菜单基于 `EditorSuggest` 实现
 - 阅读增强为 DOM 装饰：监听 `active-leaf-change` / `layout-change` / markdown 渲染事件，注入文档头
 - 标题编号使用 CSS counter（阅读模式作用于 `.markdown-preview-view`，实时预览作用于 CM6 的 `HyperMD-header-N`）
-- 同步模块结构：`src/yuque/api.ts`（API v2 客户端 + 节流退避）、`lake.ts`（Lake/Markdown 双通道转换）、`sync.ts`（增量同步 + 目录还原 + 图片本地化）、`ui.ts`（向导 + 进度 + 诊断）
+- 同步模块结构：`src/yuque/api.ts`（API v2 客户端 + 节流退避）、`lake.ts`（Lake/Markdown 双通道转换）、`sync.ts`（增量同步 + 目录还原与跟随 + 图片本地化）、`ui.ts`（向导 + 进度 + 诊断）
 - 排版样式全部走 `styles.css`，使用 Obsidian CSS 变量，自动适配亮/暗主题
 
 ## 更新日志
 
+- **v0.7.0** 修复「语雀端给分组改名后，增量同步不更新本地文件夹名」：增量判定原先只看文档的 `updated_at`，而分组改名不改动组内任何文档；现在同步记录会记住语雀侧的分组，发现变化就把本地文件搬到新分组下（不重新下载正文），你在本地自己改过的目录名不会被覆盖
 - **v0.6.9** 属性全隐藏时的收起规则改用运行时注入 `<style>`（`styles.css` 那条未生效）；四个选择器点名容器，两模式同时生效
 - **v0.6.8** 全部隐藏时整块属性面板收起；五个 toggles 收成「笔记属性」下拉，带「隐藏 N / 5 个」统计
 - **v0.6.7** 修复「笔记属性：语雀ID」因键名被强制转小写而失效；「文档头信息」成为总开关
@@ -194,6 +197,5 @@ npm run probe      # 打包 tools/ 下的离线探针（体检 / 配额盘点 / 
 - **v0.6.3** 关闭「文档属性」时可选清理已写入的属性；新增命令「语雀同步：移除文档属性」
 - **v0.6.2** 修复正文被默认色 `<span>` 包成噪声（#4D4D4D / #4F4F4F 不再输出），新增就地清理命令
 - **v0.6.1** 属性键名全面中文化，新增「文档属性」开关，旧英文键仍可回读
-- **v0.6.0** 文档头「创建于」改为语雀真实创建时间；补 `yuque_id` / `yuque_created_at` / `yuque_tags` 落盘；新增命令「补齐文档属性」
 
-**v0.5.x 及更早**见 [更新日志全文](docs/CHANGELOG.md)。
+**v0.6.0 及更早**见 [更新日志全文](docs/CHANGELOG.md)。
