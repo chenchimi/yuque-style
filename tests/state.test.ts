@@ -3,6 +3,8 @@ import {
   applyRename,
   decideWrite,
   docUrl,
+  folderOfPath,
+  followTocFolderMove,
   hashContent,
   migrateSyncState,
   pickRelocateSource,
@@ -16,7 +18,10 @@ const FULL = {
   url: "https://www.yuque.com/a/b",
   title: "设计文档",
   hash: "abc-def",
+  folder: "",
 };
+
+
 
 describe("stateKey", () => {
   it("拼接 namespace 与 slug", () => {
@@ -47,6 +52,8 @@ describe("migrateSyncState", () => {
         url: "",
         title: "",
         hash: "",
+        // 旧记录没有分组历史 → 未知，不能拿它当「上次在根分组」
+        folder: null,
       },
     });
   });
@@ -71,6 +78,7 @@ describe("migrateSyncState", () => {
       url: "",
       title: "",
       hash: "",
+      folder: null,
     });
     expect(out["a/new"].hash).toBe("abc-def");
   });
@@ -83,6 +91,7 @@ describe("migrateSyncState", () => {
       url: "",
       title: "",
       hash: "",
+      folder: null,
     });
   });
 
@@ -96,7 +105,20 @@ describe("migrateSyncState", () => {
       url: "",
       title: "",
       hash: "",
+      folder: null,
     });
+  });
+
+  it("保留已记录的分组（含空串 = 根分组）", () => {
+    expect(migrateSyncState({ "a/b": { ...FULL } })["a/b"].folder).toBe("");
+    expect(
+      migrateSyncState({ "a/b": { ...FULL, folder: "运维/内网" } })["a/b"].folder,
+    ).toBe("运维/内网");
+  });
+
+  it("folder 类型异常时降级为未知", () => {
+    const out = migrateSyncState({ "a/b": { ...FULL, folder: 42 } });
+    expect(out["a/b"].folder).toBeNull();
   });
 
   it("丢弃无法识别的 value", () => {
@@ -270,6 +292,89 @@ describe("applyRename", () => {
     expect(applyRename(s, "yuque/x.md", "yuque/y.md", false).sort()).toEqual(["ns/a", "ns/b"]);
     expect(s["ns/a"].path).toBe("yuque/y");
     expect(s["ns/b"].path).toBe("yuque/y");
+  });
+});
+
+describe("folderOfPath", () => {
+  it("去掉文件名，剩下的是分组", () => {
+    expect(folderOfPath("语雀/运维/内网穿透", "语雀")).toBe("运维");
+  });
+
+  it("多层分组全部保留", () => {
+    expect(folderOfPath("语雀/运维/内网/穿透", "语雀")).toBe("运维/内网");
+  });
+
+  it("直接放在目标文件夹下 → 空串（根分组）", () => {
+    expect(folderOfPath("语雀/标题A", "语雀")).toBe("");
+  });
+
+  it("目标文件夹为空（落在仓库根目录）时同样成立", () => {
+    expect(folderOfPath("标题A", "")).toBe("");
+    expect(folderOfPath("运维/标题A", "")).toBe("运维");
+  });
+
+  it("路径不在目标文件夹下（用户把整个任务目录搬走了）→ null，无从判断", () => {
+    expect(folderOfPath("归档/语雀/标题A", "语雀")).toBeNull();
+  });
+
+  it("空路径 → null", () => {
+    expect(folderOfPath("", "语雀")).toBeNull();
+  });
+});
+
+describe("followTocFolderMove", () => {
+  it("分组改名 → 只换分组那一段", () => {
+    expect(followTocFolderMove("语雀/旧分组/标题A", "旧分组", "新分组")).toBe("语雀/新分组/标题A");
+  });
+
+  it("嵌套分组改名", () => {
+    expect(followTocFolderMove("语雀/父/旧子/标题A", "父/旧子", "父/新子")).toBe(
+      "语雀/父/新子/标题A",
+    );
+  });
+
+  it("从根目录移进分组", () => {
+    expect(followTocFolderMove("语雀/标题A", "", "运维")).toBe("语雀/运维/标题A");
+  });
+
+  it("从分组移出到根目录", () => {
+    expect(followTocFolderMove("语雀/运维/标题A", "运维", "")).toBe("语雀/标题A");
+  });
+
+  it("保留用户改过的文件名", () => {
+    expect(followTocFolderMove("语雀/旧分组/我的笔记", "旧分组", "新分组")).toBe(
+      "语雀/新分组/我的笔记",
+    );
+  });
+
+  it("保留更上层目录（如用户把整个任务目录搬到了归档下）", () => {
+    expect(followTocFolderMove("归档/语雀/旧分组/标题A", "旧分组", "新分组")).toBe(
+      "归档/语雀/新分组/标题A",
+    );
+  });
+
+  it("分组没变 → 不搬", () => {
+    expect(followTocFolderMove("语雀/分组/标题A", "分组", "分组")).toBeNull();
+  });
+
+  it("上次分组未知（旧记录）→ 不猜，不搬", () => {
+    expect(followTocFolderMove("语雀/旧分组/标题A", null, "新分组")).toBeNull();
+  });
+
+  it("本地自己改过分组名（对不上记录）→ 尊重用户，不搬", () => {
+    expect(followTocFolderMove("语雀/我的分组/标题A", "旧分组", "新分组")).toBeNull();
+  });
+
+  it("段边界不误伤：我的分组 ≠ 分组", () => {
+    expect(followTocFolderMove("语雀/我的分组/标题A", "分组", "新分组")).toBeNull();
+  });
+
+  it("空路径 → 不搬", () => {
+    expect(followTocFolderMove("", "旧", "新")).toBeNull();
+  });
+
+  it("目标分组已在路径上 → 不往里再套一层", () => {
+    expect(followTocFolderMove("语雀/新分组/标题A", "", "新分组")).toBeNull();
   });
 });
 

@@ -376,6 +376,8 @@ async function main(): Promise<void> {
       url: rec?.url || docUrl(ns, r.slug),
       title: r.title,
       hash: r.kind === "A" ? hashContent(r.next) : rec?.hash || "",
+      // 探针不重建目录结构，分组沿用原记录（无则视为未知）
+      folder: rec?.folder ?? null,
     };
     pathWritten++;
     if (r.kind === "A") hashWritten++;

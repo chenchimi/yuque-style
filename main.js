@@ -1824,7 +1824,8 @@ var EMPTY_STATE = {
   path: "",
   url: "",
   title: "",
-  hash: ""
+  hash: "",
+  folder: null
 };
 function stateKey(namespace, slug) {
   return `${namespace}/${slug}`;
@@ -1841,7 +1842,9 @@ function toDocState(raw) {
     path: typeof o.path === "string" ? o.path : "",
     url: typeof o.url === "string" ? o.url : "",
     title: typeof o.title === "string" ? o.title : "",
-    hash: typeof o.hash === "string" ? o.hash : ""
+    hash: typeof o.hash === "string" ? o.hash : "",
+    // 缺字段 = 升级前写下的记录，分组历史无从得知 → null（未知）
+    folder: typeof o.folder === "string" ? o.folder : null
   };
 }
 function hashContent(content) {
@@ -1900,6 +1903,29 @@ function pickRelocateSource(recPath, newPath, titleMatches) {
   if (!newPath) return null;
   if (recPath && recPath !== newPath) return recPath;
   return titleMatches.length === 1 ? titleMatches[0] : null;
+}
+function nameOf(path) {
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+function folderOfPath(path, targetFolder) {
+  if (!path) return null;
+  const prefix = targetFolder ? `${targetFolder}/` : "";
+  if (prefix && !path.startsWith(prefix)) return null;
+  const rel = prefix ? path.slice(prefix.length) : path;
+  const seg = rel.split("/");
+  seg.pop();
+  return seg.join("/");
+}
+function followTocFolderMove(recPath, prevFolder, nextFolder) {
+  if (!recPath || prevFolder === null || prevFolder === nextFolder) return null;
+  const name = nameOf(recPath);
+  const prevSeg = prevFolder ? `${prevFolder}/${name}` : name;
+  if (!recPath.endsWith(prevSeg)) return null;
+  const prefix = recPath.slice(0, recPath.length - prevSeg.length);
+  if (prefix && !prefix.endsWith("/")) return null;
+  if (nextFolder && prefix.endsWith(`${nextFolder}/`)) return null;
+  const nextSeg = nextFolder ? `${nextFolder}/${name}` : name;
+  return `${prefix}${nextSeg}`;
 }
 
 // src/yuque/link.ts
@@ -2125,7 +2151,7 @@ async function pruneBackups(app, dir) {
   }
 }
 async function syncTask(plugin, api, task, log, signal) {
-  var _a, _b, _c, _d, _e, _f;
+  var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j;
   const settings = plugin.settings;
   const ns = task.namespace;
   const retryLog = (waitSec, attempt) => log(`\u8BED\u96C0 API \u9650\u6D41\uFF0C${waitSec} \u79D2\u540E\u81EA\u52A8\u91CD\u8BD5\uFF08\u7B2C ${attempt} \u6B21\uFF09\u2026`);
@@ -2214,6 +2240,7 @@ async function syncTask(plugin, api, task, log, signal) {
   const colorMode = settings.yuqueTextColor || "drop";
   const pending = [];
   let skipped = 0;
+  let relocated = 0;
   for (const d of targets) {
     const key = stateKey(ns, d.slug);
     const rec = state[key];
@@ -2227,6 +2254,31 @@ async function syncTask(plugin, api, task, log, signal) {
       );
       file = plugin.app.vault.getAbstractFileByPath(`${resolvedPath}.md`);
     }
+    const tocFolder = tocFolders.has(d.slug) ? (_b = tocFolders.get(d.slug)) != null ? _b : "" : null;
+    let prevFolder = (_c = rec == null ? void 0 : rec.folder) != null ? _c : null;
+    if (prevFolder === null && tocFolder !== null) {
+      prevFolder = folderOfPath(resolvedPath, task.targetFolder);
+    }
+    let folder = (_d = tocFolder != null ? tocFolder : rec == null ? void 0 : rec.folder) != null ? _d : null;
+    if (file instanceof import_obsidian5.TFile && tocFolder !== null && prevFolder !== null) {
+      const movedTo = followTocFolderMove(resolvedPath, prevFolder, tocFolder);
+      if (movedTo) {
+        try {
+          if (movedTo.includes("/")) {
+            await ensureFolder(plugin.app, movedTo.slice(0, movedTo.lastIndexOf("/")));
+          }
+          await plugin.app.vault.rename(file, `${movedTo}.md`);
+          log(`\u300C${d.title}\u300D\u5206\u7EC4\u8DDF\u968F\u8BED\u96C0\uFF1A${resolvedPath} \u2192 ${movedTo}`);
+          resolvedPath = movedTo;
+          relocated++;
+          const after = plugin.app.vault.getAbstractFileByPath(`${movedTo}.md`);
+          if (after instanceof import_obsidian5.TFile) file = after;
+        } catch (e) {
+          log(`  \u26A0 \u5206\u7EC4\u8DDF\u968F\u5931\u8D25\u300C${d.title}\u300D\uFF1A${e.message}`, "error");
+          folder = (_e = rec == null ? void 0 : rec.folder) != null ? _e : null;
+        }
+      }
+    }
     if (rec && rec.updatedAt === d.updated_at && file instanceof import_obsidian5.TFile) {
       state[key] = {
         updatedAt: rec.updatedAt,
@@ -2234,16 +2286,17 @@ async function syncTask(plugin, api, task, log, signal) {
         url: rec.url || docUrl(ns, d.slug),
         title: d.title,
         // 本次未写入，指纹必须沿用原值，否则会误判为「本地被改过」
-        hash: rec.hash
+        hash: rec.hash,
+        folder
       };
       skipped++;
       continue;
     }
-    pending.push({ doc: d, basePath: resolvedPath });
+    pending.push({ doc: d, basePath: resolvedPath, folder });
   }
   log(`\u5171 ${targets.length} \u7BC7\uFF0C\u9700\u66F4\u65B0 ${pending.length} \u7BC7\uFF0C\u8DF3\u8FC7\u672A\u53D8\u5316 ${skipped} \u7BC7`);
   const staged = [];
-  for (const { doc: d, basePath } of pending) {
+  for (const { doc: d, basePath, folder } of pending) {
     if (signal == null ? void 0 : signal.aborted) {
       log("\u5DF2\u505C\u6B62\uFF1B\u6B63\u5728\u4FDD\u5B58\u5DF2\u540C\u6B65\u8BB0\u5F55\u2026");
       await persistState();
@@ -2256,7 +2309,7 @@ async function syncTask(plugin, api, task, log, signal) {
         [FM.title]: detail.title,
         [FM.source]: `https://www.yuque.com/${ns}/${d.slug}`,
         // 文档 ID 与创建时间：详情接口与列表接口都带，列表项作回退
-        [FM.id]: String((_c = (_b = detail.id) != null ? _b : d.id) != null ? _c : ""),
+        [FM.id]: String((_g = (_f = detail.id) != null ? _f : d.id) != null ? _g : ""),
         [FM.createdAt]: detail.created_at || d.created_at || "",
         [FM.updatedAt]: detail.updated_at,
         [FM.tags]: yuqueTagNames(detail.tags)
@@ -2267,7 +2320,8 @@ async function syncTask(plugin, api, task, log, signal) {
         basePath,
         content: head + result.markdown,
         updated_at: d.updated_at,
-        warnings: result.warnings
+        warnings: result.warnings,
+        folder
       });
       for (const w of result.warnings) log(`  \u26A0 ${d.title}\uFF1A${w}`);
     } catch (e) {
@@ -2276,8 +2330,6 @@ async function syncTask(plugin, api, task, log, signal) {
   }
   if (staged.length === 0) {
     log("\u6CA1\u6709\u9700\u8981\u5199\u5165\u7684\u6587\u6863", "info");
-    await persistState();
-    return;
   }
   const slugToTitle = /* @__PURE__ */ new Map();
   for (const t of targets) slugToTitle.set(t.slug, sanitizeFileName(t.title));
@@ -2387,7 +2439,7 @@ async function syncTask(plugin, api, task, log, signal) {
         exists: existingFile !== null,
         currentContent: current,
         nextContent: doc.content,
-        knownHash: (_d = state[key]) == null ? void 0 : _d.hash
+        knownHash: (_h = state[key]) == null ? void 0 : _h.hash
       });
       if (decision === "backup-overwrite" && settings.yuqueBackupOnConflict) {
         const backupPath = await backupDocFile(plugin.app, ns, doc, current != null ? current : "");
@@ -2408,7 +2460,8 @@ async function syncTask(plugin, api, task, log, signal) {
         path: doc.basePath,
         url: docUrl(ns, doc.slug),
         title: doc.title,
-        hash: hashContent(doc.content)
+        hash: hashContent(doc.content),
+        folder: doc.folder
       };
     } catch (e) {
       log(`\u5199\u5165\u5931\u8D25\u300C${doc.title}\u300D\uFF1A${e.message}`, "error");
@@ -2416,7 +2469,7 @@ async function syncTask(plugin, api, task, log, signal) {
   }
   await persistState();
   log(
-    `\u300C${task.repoName}\u300D\u5B8C\u6210\uFF1A\u5199\u5165/\u66F4\u65B0 ${written} \u7BC7` + (unchanged > 0 ? `\uFF0C\u5185\u5BB9\u672A\u53D8 ${unchanged} \u7BC7` : "") + (moved > 0 ? `\uFF0C\u4F4D\u7F6E\u8DDF\u968F ${moved} \u7BC7` : "") + (backedUp > 0 ? `\uFF0C\u51B2\u7A81\u5907\u4EFD ${backedUp} \u7BC7` : ""),
+    `\u300C${task.repoName}\u300D\u5B8C\u6210\uFF1A\u5199\u5165/\u66F4\u65B0 ${written} \u7BC7` + (unchanged > 0 ? `\uFF0C\u5185\u5BB9\u672A\u53D8 ${unchanged} \u7BC7` : "") + (relocated > 0 ? `\uFF0C\u5206\u7EC4\u8DDF\u968F\u8BED\u96C0 ${relocated} \u7BC7` : "") + (moved > 0 ? `\uFF0C\u4F4D\u7F6E\u8DDF\u968F ${moved} \u7BC7` : "") + (backedUp > 0 ? `\uFF0C\u51B2\u7A81\u5907\u4EFD ${backedUp} \u7BC7` : ""),
     "success"
   );
   if (toc.length > 0 && task.mode === "all") {
@@ -2438,8 +2491,8 @@ async function syncTask(plugin, api, task, log, signal) {
         const indent = "  ".repeat(depth);
         if (n.type === "DOC" && n.slug && slugToTitle2.has(n.slug)) {
           const base = slugToTitle2.get(n.slug);
-          const target = (_e = linkIndex.get(stateKey(ns, n.slug))) != null ? _e : { path: "", basename: base };
-          const unique = ((_f = linkCounts.get(target.basename)) != null ? _f : 0) <= 1;
+          const target = (_i = linkIndex.get(stateKey(ns, n.slug))) != null ? _i : { path: "", basename: base };
+          const unique = ((_j = linkCounts.get(target.basename)) != null ? _j : 0) <= 1;
           lines.push(`${indent}- ${buildInternalLink(target, n.title, unique)}`);
         } else if (n.title) {
           lines.push(`${indent}- **${n.title}**`);
@@ -2455,12 +2508,15 @@ async function syncTask(plugin, api, task, log, signal) {
         await ensureFolder(plugin.app, indexPath.slice(0, indexPath.lastIndexOf("/")));
       }
       const existingIndex = plugin.app.vault.getAbstractFileByPath(indexPath);
+      let indexChanged = true;
       if (existingIndex instanceof import_obsidian5.TFile) {
-        await plugin.app.vault.modify(existingIndex, indexContent);
+        const previous = await plugin.app.vault.read(existingIndex);
+        indexChanged = previous !== indexContent;
+        if (indexChanged) await plugin.app.vault.modify(existingIndex, indexContent);
       } else {
         await plugin.app.vault.create(indexPath, indexContent);
       }
-      log(`\u5DF2\u66F4\u65B0\u77E5\u8BC6\u5E93\u76EE\u5F55\u7D22\u5F15\uFF1A${indexPath}`, "success");
+      if (indexChanged) log(`\u5DF2\u66F4\u65B0\u77E5\u8BC6\u5E93\u76EE\u5F55\u7D22\u5F15\uFF1A${indexPath}`, "success");
     } catch (e) {
       log(`\u76EE\u5F55\u7D22\u5F15\u751F\u6210\u5931\u8D25\uFF1A${e.message}`, "error");
     }

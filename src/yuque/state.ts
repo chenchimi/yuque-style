@@ -18,6 +18,14 @@ export interface YuqueDocState {
   title: string;
   /** 上次写入内容的指纹，用于判断本地是否被用户改动；空串表示「未知」 */
   hash: string;
+  /**
+   * 上次同步时由语雀 TOC 推出的分组（相对任务目标文件夹，"" = 直接放在根下）。
+   *
+   * 这是判断「语雀端给分组改名 / 挪动」的唯一依据：文档正文没变时 updated_at 也不变，
+   * 只看 updated_at 会整组跳过，本地目录名永远停在旧的那一个。
+   * `null` 表示未知（升级前写下的旧记录），此时不猜、只补记，避免把用户自己改的目录名搬回去。
+   */
+  folder: string | null;
 }
 
 /** key 为 `${namespace}/${slug}` */
@@ -29,6 +37,7 @@ const EMPTY_STATE: YuqueDocState = {
   url: "",
   title: "",
   hash: "",
+  folder: null,
 };
 
 export function stateKey(namespace: string, slug: string): string {
@@ -51,6 +60,8 @@ function toDocState(raw: unknown): YuqueDocState | null {
     url: typeof o.url === "string" ? o.url : "",
     title: typeof o.title === "string" ? o.title : "",
     hash: typeof o.hash === "string" ? o.hash : "",
+    // 缺字段 = 升级前写下的记录，分组历史无从得知 → null（未知）
+    folder: typeof o.folder === "string" ? o.folder : null,
   };
 }
 
@@ -180,4 +191,56 @@ export function pickRelocateSource(
   if (!newPath) return null;
   if (recPath && recPath !== newPath) return recPath;
   return titleMatches.length === 1 ? titleMatches[0] : null;
+}
+
+/** 路径最后一段（文件名，不含 .md） */
+function nameOf(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+
+/**
+ * 从本地路径反推它所在的语雀分组（相对任务目标文件夹）。
+ *
+ * 只用于给升级前写下的旧记录补一个「上次分组」的初值：这类记录没有分组历史，
+ * 先按当前本地结构认账，之后语雀端再改分组才跟随。
+ * 路径不在目标文件夹下（用户把整个任务目录搬走了）时返回 null，表示无从判断。
+ */
+export function folderOfPath(path: string, targetFolder: string): string | null {
+  if (!path) return null;
+  const prefix = targetFolder ? `${targetFolder}/` : "";
+  if (prefix && !path.startsWith(prefix)) return null;
+  const rel = prefix ? path.slice(prefix.length) : path;
+  const seg = rel.split("/");
+  seg.pop(); // 去掉文件名，剩下的是分组层级
+  return seg.join("/");
+}
+
+/**
+ * 语雀端分组改名 / 挪动后，本地文件应搬去的新路径。
+ *
+ * `prevFolder` 为记录里的语雀分组，`nextFolder` 为本次 TOC 推出的分组；两者相同即无事发生。
+ * 只替换「分组」这一段，文件名与更上层的目录原样保留——用户在本地改过的文件名，
+ * 以及整个任务目录被搬走的情况都不受影响。
+ *
+ * 两种情况返回 null（不搬）：
+ * - `prevFolder` 未知（旧记录）——不猜，避免把用户自己改的目录名搬回去；
+ * - 本地路径结尾对不上记录里的分组（用户自己改过分组名）——尊重用户的选择。
+ */
+export function followTocFolderMove(
+  recPath: string,
+  prevFolder: string | null,
+  nextFolder: string,
+): string | null {
+  if (!recPath || prevFolder === null || prevFolder === nextFolder) return null;
+  const name = nameOf(recPath);
+  const prevSeg = prevFolder ? `${prevFolder}/${name}` : name;
+  if (!recPath.endsWith(prevSeg)) return null;
+  const prefix = recPath.slice(0, recPath.length - prevSeg.length);
+  // 段边界必须落在 `/` 上，否则「我的分组」会被误配成「分组」
+  if (prefix && !prefix.endsWith("/")) return null;
+  // 目标分组已经在这条路径上（例如用户自己先把文件放进了同名目录）→ 视为已就位，
+  // 否则会套出 `语雀/新分组/新分组/标题A` 这种越搬越深的路径
+  if (nextFolder && prefix.endsWith(`${nextFolder}/`)) return null;
+  const nextSeg = nextFolder ? `${nextFolder}/${name}` : name;
+  return `${prefix}${nextSeg}`;
 }

@@ -2,7 +2,15 @@ import { App, normalizePath, TFile, TFolder } from "obsidian";
 import { YuqueApi, YuqueDocSummary, YuqueTocNode } from "./api";
 import { convertYuqueBody, type ColorMode } from "./lake";
 import { propertiesBlock, FM, yuqueTagNames } from "./frontmatter";
-import { decideWrite, docUrl, hashContent, pickRelocateSource, stateKey } from "./state";
+import {
+  decideWrite,
+  docUrl,
+  folderOfPath,
+  followTocFolderMove,
+  hashContent,
+  pickRelocateSource,
+  stateKey,
+} from "./state";
 import {
   basenameOf,
   buildInternalLink,
@@ -145,6 +153,8 @@ interface StagedDoc {
   content: string;
   updated_at: string;
   warnings: string[];
+  /** 本次 TOC 推出的语雀分组（"" = 根，null = 无法判断），写回 state 供下轮比对 */
+  folder: string | null;
 }
 
 /** 冲突备份根目录（点开头，Obsidian 不会将其索引为笔记） */
@@ -315,8 +325,9 @@ export async function syncTask(
   const colorMode: ColorMode = settings.yuqueTextColor || "drop";
   // 连解析出的本地路径一起带下去：写入阶段必须复用它。
   // 否则用户重命名后会被按「目标文件夹 + 标题」重新算回旧路径，又建出一份重复文件。
-  const pending: { doc: YuqueDocSummary; basePath: string }[] = [];
+  const pending: { doc: YuqueDocSummary; basePath: string; folder: string | null }[] = [];
   let skipped = 0;
+  let relocated = 0;
   for (const d of targets) {
     const key = stateKey(ns, d.slug);
     const rec = state[key];
@@ -334,6 +345,42 @@ export async function syncTask(
       );
       file = plugin.app.vault.getAbstractFileByPath(`${resolvedPath}.md`);
     }
+
+    // 语雀端给分组改名 / 挪动时，组内文档的 updated_at 并不会变，只看它就会整组跳过、
+    // 本地目录名永远停在旧的那个。这里改为比对「上次记录的语雀分组」与本次 TOC 的分组：
+    // 不一致就把文件搬到新分组下（正文没变，无需重新拉取）。
+    // 本地自己改的分组名不会写进 state.folder，所以不会被误判成语雀改动而搬回去。
+    const tocFolder = tocFolders.has(d.slug) ? tocFolders.get(d.slug) ?? "" : null;
+    let prevFolder = rec?.folder ?? null;
+    if (prevFolder === null && tocFolder !== null) {
+      // 升级前的旧记录没有分组历史：按当前本地结构认账，
+      // 这样「升级后第一次同步就撞上语雀改名」也能正确跟随，而不是白等一轮
+      prevFolder = folderOfPath(resolvedPath, task.targetFolder);
+    }
+    let folder = tocFolder ?? rec?.folder ?? null;
+    if (file instanceof TFile && tocFolder !== null && prevFolder !== null) {
+      const movedTo = followTocFolderMove(resolvedPath, prevFolder, tocFolder);
+      if (movedTo) {
+        try {
+          // 新分组目录多数还没建出来（整组一起改名时它就是个新名字），
+          // 而 vault.rename 不会替我们创建父目录，缺了这一步会直接 ENOENT
+          if (movedTo.includes("/")) {
+            await ensureFolder(plugin.app, movedTo.slice(0, movedTo.lastIndexOf("/")));
+          }
+          await plugin.app.vault.rename(file, `${movedTo}.md`);
+          log(`「${d.title}」分组跟随语雀：${resolvedPath} → ${movedTo}`);
+          resolvedPath = movedTo;
+          relocated++;
+          const after = plugin.app.vault.getAbstractFileByPath(`${movedTo}.md`);
+          if (after instanceof TFile) file = after;
+        } catch (e) {
+          log(`  ⚠ 分组跟随失败「${d.title}」：${(e as Error).message}`, "error");
+          // 保留旧分组，下一轮同步再试，而不是就此认定已经跟随成功
+          folder = rec?.folder ?? null;
+        }
+      }
+    }
+
     if (rec && rec.updatedAt === d.updated_at && file instanceof TFile) {
       // 顺带把补全/校正后的路径与地址写回，旧记录首次同步即自愈
       state[key] = {
@@ -343,17 +390,18 @@ export async function syncTask(
         title: d.title,
         // 本次未写入，指纹必须沿用原值，否则会误判为「本地被改过」
         hash: rec.hash,
+        folder,
       };
       skipped++;
       continue;
     }
-    pending.push({ doc: d, basePath: resolvedPath });
+    pending.push({ doc: d, basePath: resolvedPath, folder });
   }
   log(`共 ${targets.length} 篇，需更新 ${pending.length} 篇，跳过未变化 ${skipped} 篇`);
 
   // 拉取并转换
   const staged: StagedDoc[] = [];
-  for (const { doc: d, basePath } of pending) {
+  for (const { doc: d, basePath, folder } of pending) {
     if (signal?.aborted) {
       log("已停止；正在保存已同步记录…");
       await persistState();
@@ -379,6 +427,7 @@ export async function syncTask(
         content: head + result.markdown,
         updated_at: d.updated_at,
         warnings: result.warnings,
+        folder,
       });
       for (const w of result.warnings) log(`  ⚠ ${d.title}：${w}`);
     } catch (e) {
@@ -386,11 +435,10 @@ export async function syncTask(
     }
   }
   if (staged.length === 0) {
+    // 不在这里提前返回：即使一篇正文都不用写，本次也可能刚为旧记录补全了 path、
+    // 或跟随了语雀端的分组改名，目录索引页同样要按新分组重画。
+    // 记录落盘与索引页生成都在函数末尾统一处理。
     log("没有需要写入的文档", "info");
-    // 仍需落盘：增量跳过时可能刚为旧记录补全了 path，
-    // 不能因为本次没有文件写入就把这份自愈结果丢掉
-    await persistState();
-    return;
   }
 
   // 内部链接 → Obsidian 双链。
@@ -546,6 +594,7 @@ export async function syncTask(
         url: docUrl(ns, doc.slug),
         title: doc.title,
         hash: hashContent(doc.content),
+        folder: doc.folder,
       };
     } catch (e) {
       log(`写入失败「${doc.title}」：${(e as Error).message}`, "error");
@@ -555,6 +604,7 @@ export async function syncTask(
   log(
     `「${task.repoName}」完成：写入/更新 ${written} 篇` +
       (unchanged > 0 ? `，内容未变 ${unchanged} 篇` : "") +
+      (relocated > 0 ? `，分组跟随语雀 ${relocated} 篇` : "") +
       (moved > 0 ? `，位置跟随 ${moved} 篇` : "") +
       (backedUp > 0 ? `，冲突备份 ${backedUp} 篇` : ""),
     "success",
@@ -599,12 +649,17 @@ export async function syncTask(
         await ensureFolder(plugin.app, indexPath.slice(0, indexPath.lastIndexOf("/")));
       }
       const existingIndex = plugin.app.vault.getAbstractFileByPath(indexPath);
+      let indexChanged = true;
       if (existingIndex instanceof TFile) {
-        await plugin.app.vault.modify(existingIndex, indexContent);
+        // 内容一致就不写：这篇索引现在每轮同步都会走到（哪怕一篇正文都没改），
+        // 无脑 modify 只会把它的修改时间无谓地刷新一遍
+        const previous = await plugin.app.vault.read(existingIndex);
+        indexChanged = previous !== indexContent;
+        if (indexChanged) await plugin.app.vault.modify(existingIndex, indexContent);
       } else {
         await plugin.app.vault.create(indexPath, indexContent);
       }
-      log(`已更新知识库目录索引：${indexPath}`, "success");
+      if (indexChanged) log(`已更新知识库目录索引：${indexPath}`, "success");
     } catch (e) {
       log(`目录索引生成失败：${(e as Error).message}`, "error");
     }

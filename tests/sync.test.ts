@@ -110,7 +110,7 @@ const backupPaths = (v: FakeVault, slug = "a") =>
 const state = (s: ReturnType<typeof setup>) =>
   s.plugin.settings.yuqueSyncState as unknown as Record<
     string,
-    { updatedAt: string; path: string; url: string; title: string; hash: string }
+    { updatedAt: string; path: string; url: string; title: string; hash: string; folder: string | null }
   >;
 
 describe("syncTask · 增量与状态记录", () => {
@@ -275,6 +275,152 @@ describe("syncTask · 语雀端目录调整", () => {
     expect(s.vault.files.get("语雀/标题A.md")).toBe("旧拷贝");
     expect(s.vault.files.get("语雀/新分组/标题A.md")).toContain("正文B");
     expect(s.logs.some((l) => l.includes("疑似重复"))).toBe(true);
+  });
+});
+
+describe("syncTask · 语雀端分组改名", () => {
+  /** 一个分组 + 组内一篇文档的 TOC */
+  const tocWithGroup = (title: string): YuqueTocNode[] => [
+    { uuid: "g1", parent_uuid: "", title, type: "TITLE" },
+    { uuid: "d1", parent_uuid: "g1", title: "标题A", type: "DOC", slug: "a", url: "/ns/a" },
+  ];
+
+  it("分组改名：增量同步后本地文件夹跟着改名，正文没变就不重新拉取", async () => {
+    const s = setup({
+      docs: [doc("a", "标题A", "t1")],
+      bodies: { a: "正文A" },
+      toc: tocWithGroup("旧分组"),
+    });
+    await s.run();
+    expect(s.vault.files.has("语雀/旧分组/标题A.md")).toBe(true);
+    expect(state(s)["ns/a"].folder).toBe("旧分组");
+    const detailCalls = s.api.getDoc.mock.calls.length;
+
+    // 语雀端把分组改名：组内文档自身的 updated_at 不会有任何变化
+    s.api.getToc = vi.fn(async () => tocWithGroup("新分组"));
+    await s.run();
+
+    expect(s.vault.files.has("语雀/新分组/标题A.md")).toBe(true);
+    expect(s.vault.files.has("语雀/旧分组/标题A.md")).toBe(false);
+    expect(s.logs.some((l) => l.includes("分组跟随语雀"))).toBe(true);
+    expect(state(s)["ns/a"].path).toBe("语雀/新分组/标题A");
+    expect(state(s)["ns/a"].folder).toBe("新分组");
+    // vault.rename 不会创建目标文件夹，新分组目录必须先由插件建出来（否则 ENOENT）
+    expect(s.vault.dirs.has("语雀/新分组")).toBe(true);
+    // 只是改了个文件夹名，不该为此重新下载正文
+    expect(s.api.getDoc.mock.calls.length).toBe(detailCalls);
+  });
+
+  it("升级前的旧记录（无分组历史）：语雀改名后第一次同步就能跟随", async () => {
+    const oldContent = "旧正文";
+    const s = setup({
+      docs: [doc("a", "标题A", "t1")],
+      bodies: { a: "正文A" },
+      toc: tocWithGroup("新分组"),
+      // 旧版格式记录：没有 folder 字段，path 指向改名前的分组
+      state: {
+        "ns/a": {
+          updatedAt: "t1",
+          path: "语雀/旧分组/标题A",
+          url: "",
+          title: "标题A",
+          hash: hashContent(oldContent),
+        },
+      },
+    });
+    await s.vault.create("语雀/旧分组/标题A.md", oldContent);
+
+    await s.run();
+
+    expect(s.vault.files.has("语雀/新分组/标题A.md")).toBe(true);
+    expect(s.vault.files.has("语雀/旧分组/标题A.md")).toBe(false);
+    expect(state(s)["ns/a"].path).toBe("语雀/新分组/标题A");
+    // 正文未变 → 直接跳过写入，磁盘上的内容一动不动
+    expect(s.vault.files.get("语雀/新分组/标题A.md")).toBe(oldContent);
+  });
+
+  it("本地自己改的分组名不会被语雀端结构搬回去", async () => {
+    const s = setup({
+      docs: [doc("a", "标题A", "t1")],
+      bodies: { a: "正文A" },
+      toc: tocWithGroup("分组"),
+    });
+    await s.run();
+    expect(state(s)["ns/a"].folder).toBe("分组");
+
+    // 与 main.ts 的 handleRename 一致：本地改名只更新 path，不动 folder
+    s.vault.on("rename", (file, oldPath) => {
+      applyRename(
+        s.plugin.settings.yuqueSyncState as never,
+        oldPath,
+        file.path,
+        file instanceof TFolder,
+      );
+    });
+    await s.vault.rename(s.vault.getAbstractFileByPath("语雀/分组")!, "语雀/我的分组");
+    expect(state(s)["ns/a"].path).toBe("语雀/我的分组/标题A");
+
+    await s.run();
+
+    expect(s.vault.files.has("语雀/我的分组/标题A.md")).toBe(true);
+    expect(s.vault.files.has("语雀/分组/标题A.md")).toBe(false);
+  });
+
+  it("只有分组改名、正文全都不用写时，目录索引页也要跟着刷新", async () => {
+    const s = setup({
+      docs: [doc("a", "标题A", "t1")],
+      bodies: { a: "正文A" },
+      toc: tocWithGroup("旧分组"),
+    });
+    await s.run();
+    expect(s.vault.files.get("语雀/我的库 目录.md")).toContain("**旧分组**");
+
+    s.api.getToc = vi.fn(async () => tocWithGroup("新分组"));
+    await s.run();
+
+    expect(s.logs.some((l) => l.includes("没有需要写入的文档"))).toBe(true);
+    expect(s.vault.files.get("语雀/我的库 目录.md")).toContain("**新分组**");
+  });
+
+  it("一篇都没变时不会无谓重写目录索引页", async () => {
+    const s = setup({
+      docs: [doc("a", "标题A", "t1")],
+      bodies: { a: "正文A" },
+      toc: tocWithGroup("分组"),
+    });
+    await s.run();
+    const writes = s.vault.writes.length;
+
+    await s.run();
+
+    expect(s.vault.writes.length).toBe(writes);
+  });
+
+  it("分组被挪到别的父分组下：整组跟随，不产生重复", async () => {
+    const s = setup({
+      docs: [doc("a", "标题A", "t1")],
+      bodies: { a: "正文A" },
+      toc: [
+        { uuid: "p1", parent_uuid: "", title: "父分组", type: "TITLE" },
+        { uuid: "g1", parent_uuid: "p1", title: "子分组", type: "TITLE" },
+        { uuid: "d1", parent_uuid: "g1", title: "标题A", type: "DOC", slug: "a", url: "/ns/a" },
+      ],
+    });
+    await s.run();
+    expect(s.vault.files.has("语雀/父分组/子分组/标题A.md")).toBe(true);
+
+    // 语雀端把「子分组」改名（父级结构不变）
+    s.api.getToc = vi.fn(async () => [
+      { uuid: "p1", parent_uuid: "", title: "父分组", type: "TITLE" },
+      { uuid: "g1", parent_uuid: "p1", title: "新子分组", type: "TITLE" },
+      { uuid: "d1", parent_uuid: "g1", title: "标题A", type: "DOC", slug: "a", url: "/ns/a" },
+    ]);
+    await s.run();
+
+    expect(s.vault.files.has("语雀/父分组/新子分组/标题A.md")).toBe(true);
+    expect(s.vault.dirs.has("语雀/父分组/新子分组")).toBe(true);
+    expect(notePaths(s.vault).filter((p) => p.endsWith("标题A.md"))).toHaveLength(1);
+    expect(state(s)["ns/a"].folder).toBe("父分组/新子分组");
   });
 });
 
