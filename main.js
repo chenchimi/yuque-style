@@ -30,10 +30,56 @@ __export(main_exports, {
   default: () => YuqueStylePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian9 = require("obsidian");
+var import_obsidian17 = require("obsidian");
 
 // src/reader.ts
 var import_obsidian = require("obsidian");
+
+// src/doc-meta.ts
+var WORDS_PER_MINUTE = 400;
+function countWords(content) {
+  const plain = content.replace(/```[\s\S]*?```/g, " ").replace(/[#>*_`~|\[\]()!-]/g, " ");
+  return plain.replace(/\s+/g, "").length;
+}
+function formatWordCount(words) {
+  if (words >= 1e4) return `${(words / 1e4).toFixed(1)} \u4E07\u5B57`;
+  return `${words} \u5B57`;
+}
+function readingMinutes(words) {
+  return Math.max(1, Math.round(words / WORDS_PER_MINUTE));
+}
+function pad(n) {
+  return n < 10 ? `0${n}` : String(n);
+}
+function formatDate(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+function formatRelativeTime(ts, now) {
+  if (!Number.isFinite(ts) || Number.isNaN(new Date(ts).getTime())) return "";
+  const diff = now - ts;
+  if (diff < 6e4) return "\u521A\u521A";
+  if (diff < 36e5) return `${Math.floor(diff / 6e4)} \u5206\u949F\u524D`;
+  if (diff < 864e5) return `${Math.floor(diff / 36e5)} \u5C0F\u65F6\u524D`;
+  if (diff < 7 * 864e5) return `${Math.floor(diff / 864e5)} \u5929\u524D`;
+  return formatDate(ts);
+}
+function parseYuqueDate(raw) {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const at = new Date(raw.trim());
+  return Number.isNaN(at.getTime()) ? null : at;
+}
+function syncBadge(source, yuqueUpdatedAt) {
+  const url = typeof source === "string" && /^https?:\/\//.test(source.trim()) ? source.trim() : null;
+  if (!url) return { kind: "local", text: "\u672C\u5730\u6587\u6863 \xB7 \u672A\u540C\u6B65", url: null };
+  const at = parseYuqueDate(yuqueUpdatedAt);
+  return {
+    kind: "yuque",
+    text: at ? `\u8BED\u96C0 \xB7 \u66F4\u65B0\u4E8E ${formatDate(at.getTime())}` : "\u8BED\u96C0\u5DF2\u540C\u6B65",
+    url
+  };
+}
 
 // src/yuque/frontmatter.ts
 function keyOf(line) {
@@ -221,6 +267,39 @@ function ensureFrontmatterFields(content, fields) {
   return null;
 }
 
+// src/lightbox.ts
+var LIGHTBOX_ID = "yuque-lightbox";
+function pickZoomableImage(target) {
+  var _a;
+  if (!(target instanceof HTMLImageElement)) return null;
+  const scope = target.closest(".markdown-preview-view, .yuque-reader");
+  if (!scope) return null;
+  const src = target.getAttribute("src");
+  if (!src) return null;
+  return { src, alt: (_a = target.alt) != null ? _a : "" };
+}
+function openLightbox(src, alt) {
+  closeLightbox();
+  const overlay = document.createElement("div");
+  overlay.id = LIGHTBOX_ID;
+  const img = document.createElement("img");
+  img.src = src;
+  img.alt = alt;
+  overlay.appendChild(img);
+  overlay.addEventListener("click", closeLightbox);
+  overlay.tabIndex = -1;
+  document.body.appendChild(overlay);
+  document.addEventListener("keydown", onKeydown);
+}
+function closeLightbox() {
+  var _a;
+  (_a = document.getElementById(LIGHTBOX_ID)) == null ? void 0 : _a.remove();
+  document.removeEventListener("keydown", onKeydown);
+}
+function onKeydown(e) {
+  if (e.key === "Escape") closeLightbox();
+}
+
 // src/reader.ts
 var ReaderEnhancer = class {
   constructor(plugin) {
@@ -240,6 +319,14 @@ var ReaderEnhancer = class {
       refresh();
     });
     this.plugin.registerInterval(window.setInterval(() => this.refresh(), 1500));
+    this.plugin.registerDomEvent(document, "click", (evt) => {
+      if (!this.plugin.settings.reader) return;
+      const hit = pickZoomableImage(evt.target);
+      if (hit) {
+        evt.preventDefault();
+        openLightbox(hit.src, hit.alt);
+      }
+    });
   }
   /** force = true 时无视缓存强制重新装饰 */
   refresh(force = false) {
@@ -313,13 +400,9 @@ var ReaderEnhancer = class {
     }
     const meta = createEl("div", { cls: "yuque-doc-meta" });
     void this.plugin.app.vault.cachedRead(file).then((content) => {
-      const plain = content.replace(/```[\s\S]*?```/g, " ").replace(/[#>*_`~|\[\]()!-]/g, " ");
-      const words = plain.replace(/\s+/g, "").length;
-      meta.createSpan({ text: `${words} \u5B57` });
-      if (this.plugin.settings.showReadingTime) {
-        const minutes = Math.max(1, Math.round(words / 400));
-        meta.createSpan({ text: `\u7EA6 ${minutes} \u5206\u949F\u8BFB\u5B8C` });
-      }
+      const words = countWords(content);
+      meta.createSpan({ text: formatWordCount(words) });
+      meta.createSpan({ text: `\u7EA6 ${readingMinutes(words)} \u5206\u949F\u8BFB\u5B8C` });
       this.appendYuqueDate(meta, "\u521B\u5EFA\u4E8E", readFm(fm, "createdAt"));
       this.appendYuqueDate(meta, "\u66F4\u65B0\u4E8E", readFm(fm, "updatedAt"));
       for (const tag of listFrontmatterTags(readFm(fm, "tags")).slice(0, 8)) {
@@ -349,7 +432,110 @@ function listFrontmatterTags(raw) {
 }
 
 // src/slash.ts
+var import_obsidian3 = require("obsidian");
+
+// src/rich-ui.ts
 var import_obsidian2 = require("obsidian");
+var TEXT_COLORS = [
+  { name: "\u7EA2", value: "#e53935" },
+  { name: "\u6A59", value: "#fb8c00" },
+  { name: "\u9EC4", value: "#f9a825" },
+  { name: "\u7EFF", value: "#43a047" },
+  { name: "\u9752", value: "#00acc1" },
+  { name: "\u84DD", value: "#1e88e5" },
+  { name: "\u7D2B", value: "#8e24aa" },
+  { name: "\u7070", value: "#757575" }
+];
+var LinkModal = class extends import_obsidian2.Modal {
+  constructor(app, hasText, onSubmit) {
+    super(app);
+    this.hasText = hasText;
+    this.onSubmit = onSubmit;
+  }
+  onOpen() {
+    this.titleEl.setText(this.hasText ? "\u63D2\u5165\u94FE\u63A5" : "\u63D2\u5165\u7A7A\u94FE\u63A5");
+    let value = "";
+    const submit = () => {
+      this.onSubmit(value);
+      this.close();
+    };
+    new import_obsidian2.Setting(this.contentEl).setName("\u94FE\u63A5\u5730\u5740").setDesc(this.hasText ? "" : "\u63D2\u5165\u540E\u5149\u6807\u505C\u5728\u65B9\u62EC\u53F7\u5185\uFF0C\u53EF\u4EE5\u586B\u94FE\u63A5\u6587\u5B57").addText((t) => {
+      t.setPlaceholder("https://\u2026").onChange((v) => {
+        value = v.trim();
+      });
+      t.inputEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          submit();
+        }
+      });
+      window.setTimeout(() => t.inputEl.focus(), 0);
+    });
+    new import_obsidian2.Setting(this.contentEl).addButton((b) => b.setButtonText("\u63D2\u5165").setCta().onClick(submit));
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+var ColorModal = class extends import_obsidian2.Modal {
+  constructor(app, onSubmit) {
+    super(app);
+    this.onSubmit = onSubmit;
+  }
+  onOpen() {
+    this.titleEl.setText("\u6587\u5B57\u989C\u8272");
+    this.contentEl.createEl("p", {
+      text: '\u5C06\u63D2\u5165 <span style="color:\u2026">\uFF0C\u4E0E\u8BED\u96C0\u540C\u6B65\u4E0B\u6765\u7684\u5F69\u8272\u6587\u5B57\u5199\u6CD5\u4E00\u81F4\u3002',
+      cls: "setting-item-description"
+    });
+    const grid = this.contentEl.createDiv({ cls: "yuque-color-grid" });
+    for (const color of TEXT_COLORS) {
+      const btn = grid.createEl("button", {
+        cls: "yuque-color-swatch",
+        attr: { "aria-label": color.name, title: color.name }
+      });
+      btn.style.backgroundColor = color.value;
+      btn.addEventListener("click", () => {
+        this.onSubmit(color.value);
+        this.close();
+      });
+    }
+    new import_obsidian2.Setting(this.contentEl).addButton(
+      (b) => b.setButtonText("\u6E05\u9664\u989C\u8272").onClick(() => {
+        this.onSubmit(null);
+        this.close();
+      })
+    );
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+function applySlashItem(args) {
+  var _a, _b, _c, _d;
+  const { app, editor, item, file } = args;
+  const text = item.resolve ? item.resolve({ file, app }) : item.insert;
+  if (text === null) {
+    new import_obsidian2.Notice((_a = item.emptyHint) != null ? _a : "\u65E0\u6CD5\u63D2\u5165\u8BE5\u5185\u5BB9");
+    return false;
+  }
+  const start = (_c = (_b = args.start) != null ? _b : args.end) != null ? _c : editor.getCursor();
+  const end = (_d = args.end) != null ? _d : start;
+  const startOffset = editor.posToOffset(start);
+  editor.replaceRange(text, start, end);
+  if (item.selectText) {
+    const at = text.indexOf(item.selectText);
+    if (at >= 0) {
+      editor.setSelection(
+        editor.offsetToPos(startOffset + at),
+        editor.offsetToPos(startOffset + at + item.selectText.length)
+      );
+      return true;
+    }
+  }
+  editor.setCursor(editor.offsetToPos(startOffset + text.length - item.cursorBack));
+  return true;
+}
 
 // src/toc.ts
 function buildTocBlock(headings) {
@@ -496,7 +682,7 @@ function filterSlashItems(items, query) {
 }
 
 // src/slash.ts
-var YuqueSlashSuggest = class extends import_obsidian2.EditorSuggest {
+var YuqueSlashSuggest = class extends import_obsidian3.EditorSuggest {
   constructor(plugin) {
     super(plugin.app);
     this.plugin = plugin;
@@ -527,34 +713,21 @@ var YuqueSlashSuggest = class extends import_obsidian2.EditorSuggest {
     this.close();
   }
   onChooseSuggestion(item, _evt) {
-    var _a;
     const ctx = this.context;
     if (!ctx) return;
-    const text = item.resolve ? item.resolve({ file: ctx.file, app: this.plugin.app }) : item.insert;
-    if (text === null) {
-      new import_obsidian2.Notice((_a = item.emptyHint) != null ? _a : "\u65E0\u6CD5\u63D2\u5165\u8BE5\u5185\u5BB9");
-      return;
-    }
-    const editor = ctx.editor;
-    const startOffset = editor.posToOffset(ctx.start);
-    editor.replaceRange(text, ctx.start, ctx.end);
-    if (item.selectText) {
-      const at = text.indexOf(item.selectText);
-      if (at >= 0) {
-        editor.setSelection(
-          editor.offsetToPos(startOffset + at),
-          editor.offsetToPos(startOffset + at + item.selectText.length)
-        );
-        return;
-      }
-    }
-    editor.setCursor(editor.offsetToPos(startOffset + text.length - item.cursorBack));
+    applySlashItem({
+      app: this.plugin.app,
+      editor: ctx.editor,
+      item,
+      file: ctx.file,
+      start: ctx.start,
+      end: ctx.end
+    });
   }
 };
 
 // src/toolbar.ts
-var import_obsidian3 = require("obsidian");
-var import_state = require("@codemirror/state");
+var import_obsidian4 = require("obsidian");
 var import_view = require("@codemirror/view");
 
 // src/table.ts
@@ -659,144 +832,6 @@ function applyTableOp(block, op) {
 }
 
 // src/toolbar.ts
-function wrap(view, mark) {
-  const sel = view.state.selection.main;
-  if (sel.empty) return;
-  const text = view.state.sliceDoc(sel.from, sel.to);
-  view.dispatch({
-    changes: { from: sel.from, to: sel.to, insert: `${mark}${text}${mark}` },
-    selection: import_state.EditorSelection.range(sel.from + mark.length, sel.to + mark.length)
-  });
-}
-function toggleLinePrefix(view, prefix) {
-  const { state } = view;
-  const sel = state.selection.main;
-  const firstLine = state.doc.lineAt(sel.from);
-  const lastLine = state.doc.lineAt(sel.to);
-  const changes = [];
-  for (let n = firstLine.number; n <= lastLine.number; n++) {
-    const line = state.doc.line(n);
-    if (line.text.startsWith(prefix)) {
-      changes.push({ from: line.from, to: line.from + prefix.length, insert: "" });
-    } else {
-      changes.push({ from: line.from, to: line.from, insert: prefix });
-    }
-  }
-  view.dispatch({ changes });
-}
-var TEXT_COLORS = [
-  { name: "\u7EA2", value: "#e53935" },
-  { name: "\u6A59", value: "#fb8c00" },
-  { name: "\u9EC4", value: "#f9a825" },
-  { name: "\u7EFF", value: "#43a047" },
-  { name: "\u9752", value: "#00acc1" },
-  { name: "\u84DD", value: "#1e88e5" },
-  { name: "\u7D2B", value: "#8e24aa" },
-  { name: "\u7070", value: "#757575" }
-];
-var LinkModal = class extends import_obsidian3.Modal {
-  constructor(app, hasText, onSubmit) {
-    super(app);
-    this.hasText = hasText;
-    this.onSubmit = onSubmit;
-  }
-  onOpen() {
-    this.titleEl.setText(this.hasText ? "\u63D2\u5165\u94FE\u63A5" : "\u63D2\u5165\u7A7A\u94FE\u63A5");
-    let value = "";
-    const submit = () => {
-      this.onSubmit(value);
-      this.close();
-    };
-    new import_obsidian3.Setting(this.contentEl).setName("\u94FE\u63A5\u5730\u5740").setDesc(this.hasText ? "" : "\u63D2\u5165\u540E\u5149\u6807\u505C\u5728\u65B9\u62EC\u53F7\u5185\uFF0C\u53EF\u4EE5\u586B\u94FE\u63A5\u6587\u5B57").addText((t) => {
-      t.setPlaceholder("https://\u2026").onChange((v) => {
-        value = v.trim();
-      });
-      t.inputEl.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          submit();
-        }
-      });
-      window.setTimeout(() => t.inputEl.focus(), 0);
-    });
-    new import_obsidian3.Setting(this.contentEl).addButton(
-      (b) => b.setButtonText("\u63D2\u5165").setCta().onClick(submit)
-    );
-  }
-  onClose() {
-    this.contentEl.empty();
-  }
-};
-var ColorModal = class extends import_obsidian3.Modal {
-  constructor(app, onSubmit) {
-    super(app);
-    this.onSubmit = onSubmit;
-  }
-  onOpen() {
-    this.titleEl.setText("\u6587\u5B57\u989C\u8272");
-    this.contentEl.createEl("p", {
-      text: '\u5C06\u63D2\u5165 <span style="color:\u2026">\uFF0C\u4E0E\u8BED\u96C0\u540C\u6B65\u4E0B\u6765\u7684\u5F69\u8272\u6587\u5B57\u5199\u6CD5\u4E00\u81F4\u3002',
-      cls: "setting-item-description"
-    });
-    const grid = this.contentEl.createDiv({ cls: "yuque-color-grid" });
-    for (const color of TEXT_COLORS) {
-      const btn = grid.createEl("button", {
-        cls: "yuque-color-swatch",
-        attr: { "aria-label": color.name, title: color.name }
-      });
-      btn.style.backgroundColor = color.value;
-      btn.addEventListener("click", () => {
-        this.onSubmit(color.value);
-        this.close();
-      });
-    }
-    new import_obsidian3.Setting(this.contentEl).addButton(
-      (b) => b.setButtonText("\u6E05\u9664\u989C\u8272").onClick(() => {
-        this.onSubmit(null);
-        this.close();
-      })
-    );
-  }
-  onClose() {
-    this.contentEl.empty();
-  }
-};
-function applyLink(view, app) {
-  const sel = view.state.selection.main;
-  const hasText = !sel.empty;
-  const label = hasText ? view.state.sliceDoc(sel.from, sel.to) : "";
-  new LinkModal(app, hasText, (url) => {
-    if (!url) return;
-    if (hasText) {
-      view.dispatch({ changes: { from: sel.from, to: sel.to, insert: `[${label}](${url})` } });
-    } else {
-      view.dispatch({
-        changes: { from: sel.from, insert: `[](${url})` },
-        selection: import_state.EditorSelection.cursor(sel.from + 1)
-      });
-    }
-    view.focus();
-  }).open();
-}
-function applyColor(view, app) {
-  const sel = view.state.selection.main;
-  if (sel.empty) {
-    new import_obsidian3.Notice("\u8BF7\u5148\u9009\u4E2D\u8981\u4E0A\u8272\u7684\u6587\u5B57");
-    return;
-  }
-  const text = view.state.sliceDoc(sel.from, sel.to);
-  new ColorModal(app, (color) => {
-    const next = color === null ? (
-      // 清除：把选区内的颜色标签摘掉
-      text.replace(/<\/?span[^>]*style="color:[^"]*"[^>]*>/g, "")
-    ) : `<span style="color:${color}">${text}</span>`;
-    view.dispatch({
-      changes: { from: sel.from, to: sel.to, insert: next },
-      selection: import_state.EditorSelection.range(sel.from, sel.from + next.length)
-    });
-    view.focus();
-  }).open();
-}
 var TABLE_ACTIONS = [
   { label: "\u2191\u884C", title: "\u5728\u5149\u6807\u884C\u4E0A\u65B9\u63D2\u5165\u4E00\u884C", op: "insert-row-above" },
   { label: "\u2193\u884C", title: "\u5728\u5149\u6807\u884C\u4E0B\u65B9\u63D2\u5165\u4E00\u884C", op: "insert-row-below" },
@@ -812,12 +847,12 @@ function applyTable(view, op) {
   const src = { count: state.doc.lines, at: (n) => state.doc.line(n).text };
   const block = locateTable(src, info.number, sel.head - info.from);
   if (!block) {
-    new import_obsidian3.Notice("\u5149\u6807\u4E0D\u5728\u8868\u683C\u91CC");
+    new import_obsidian4.Notice("\u5149\u6807\u4E0D\u5728\u8868\u683C\u91CC");
     return;
   }
   const next = applyTableOp(block, op);
   if (next === null) {
-    new import_obsidian3.Notice(op === "delete-col" ? "\u4E0D\u80FD\u5220\u9664\u8868\u683C\u7684\u6700\u540E\u4E00\u5217" : "\u8868\u5934\u4E0E\u5206\u9694\u884C\u4E0D\u80FD\u5220\u9664");
+    new import_obsidian4.Notice(op === "delete-col" ? "\u4E0D\u80FD\u5220\u9664\u8868\u683C\u7684\u6700\u540E\u4E00\u5217" : "\u8868\u5934\u4E0E\u5206\u9694\u884C\u4E0D\u80FD\u5220\u9664");
     return;
   }
   view.dispatch({
@@ -829,29 +864,11 @@ function applyTable(view, op) {
   });
   view.focus();
 }
-var TEXT_ACTIONS = [
-  { label: "B", title: "\u52A0\u7C97", apply: (v) => wrap(v, "**") },
-  { label: "I", title: "\u659C\u4F53", apply: (v) => wrap(v, "*") },
-  { label: "S", title: "\u5220\u9664\u7EBF", apply: (v) => wrap(v, "~~") },
-  { label: "\u9AD8", title: "\u9AD8\u4EAE", apply: (v) => wrap(v, "==") },
-  { label: "</>", title: "\u884C\u5185\u4EE3\u7801", apply: (v) => wrap(v, "`") },
-  { label: "H1", title: "\u6807\u9898 1", apply: (v) => toggleLinePrefix(v, "# ") },
-  { label: "H2", title: "\u6807\u9898 2", apply: (v) => toggleLinePrefix(v, "## ") },
-  { label: "H3", title: "\u6807\u9898 3", apply: (v) => toggleLinePrefix(v, "### ") },
-  { label: "H4", title: "\u6807\u9898 4", apply: (v) => toggleLinePrefix(v, "#### ") },
-  { label: "\u5F15", title: "\u5F15\u7528", apply: (v) => toggleLinePrefix(v, "> ") },
-  { label: "\u529E", title: "\u5F85\u529E", apply: (v) => toggleLinePrefix(v, "- [ ] ") },
-  { label: "\u94FE", title: "\u63D2\u5165\u94FE\u63A5", apply: (v, app) => applyLink(v, app) },
-  { label: "\u8272", title: "\u6587\u5B57\u989C\u8272", apply: (v, app) => applyColor(v, app) }
-];
 var TOOLBAR_HEIGHT = 40;
 var TOOLBAR_GAP = 8;
-var YuqueToolbar = class {
-  constructor(view, isEnabled, app) {
+var YuqueTableToolbar = class {
+  constructor(view) {
     this.view = view;
-    this.isEnabled = isEnabled;
-    this.app = app;
-    this.context = null;
     this.onScroll = () => this.reposition();
     this.host = view.scrollDOM;
     this.host.style.position = "relative";
@@ -859,6 +876,7 @@ var YuqueToolbar = class {
     this.dom.addEventListener("mousedown", (e) => e.preventDefault());
     this.dom.style.display = "none";
     this.host.appendChild(this.dom);
+    this.buildButtons();
     this.host.addEventListener("scroll", this.onScroll, { passive: true });
   }
   update(update) {
@@ -869,28 +887,9 @@ var YuqueToolbar = class {
   hide() {
     this.dom.style.display = "none";
   }
-  /** 该显示哪种形态；null = 不显示 */
-  detectContext() {
-    const { state } = this.view;
-    const sel = state.selection.main;
-    if (!sel.empty) return "text";
-    const info = state.doc.lineAt(sel.head);
-    if (!info.text.includes("|")) return null;
-    const src = { count: state.doc.lines, at: (n) => state.doc.line(n).text };
-    return locateTable(src, info.number, sel.head - info.from) ? "table" : null;
-  }
-  buildButtons(context) {
-    this.dom.empty();
-    const buttons = context === "text" ? TEXT_ACTIONS.map((a) => ({
-      label: a.label,
-      title: a.title,
-      run: () => a.apply(this.view, this.app)
-    })) : TABLE_ACTIONS.map((a) => ({
-      label: a.label,
-      title: a.title,
-      run: () => applyTable(this.view, a.op)
-    }));
-    for (const item of buttons) {
+  /** 按钮集合固定，构造时建一次，滚动与选区变化只挪位置、不重排 DOM */
+  buildButtons() {
+    for (const item of TABLE_ACTIONS) {
       const btn = this.dom.createEl("button", {
         cls: "yuque-toolbar-btn",
         text: item.label,
@@ -898,35 +897,36 @@ var YuqueToolbar = class {
       });
       btn.addEventListener("mousedown", (e) => {
         e.preventDefault();
-        item.run();
+        applyTable(this.view, item.op);
       });
     }
   }
+  /** 光标在表格内、且没有选区时才显示（有选区说明用户在选文字，不该挡着） */
+  isInTable() {
+    const { state } = this.view;
+    const sel = state.selection.main;
+    if (!sel.empty) return false;
+    const info = state.doc.lineAt(sel.head);
+    if (!info.text.includes("|")) return false;
+    const src = { count: state.doc.lines, at: (n) => state.doc.line(n).text };
+    return locateTable(src, info.number, sel.head - info.from) !== null;
+  }
   reposition() {
     try {
-      const context = this.isEnabled() && this.view.hasFocus ? this.detectContext() : null;
-      if (!context) {
-        this.context = null;
+      if (!this.view.hasFocus || !this.isInTable()) {
         this.hide();
         return;
       }
-      if (context !== this.context) {
-        this.buildButtons(context);
-        this.context = context;
-      }
       const sel = this.view.state.selection.main;
-      const start = this.view.coordsAtPos(sel.from);
-      const end = this.view.coordsAtPos(sel.to);
-      if (!start || !end) {
+      const at = this.view.coordsAtPos(sel.head);
+      if (!at) {
         this.hide();
         return;
       }
       const hostRect = this.host.getBoundingClientRect();
-      const selectionTop = Math.min(start.top, end.top);
-      const selectionCenterX = (Math.min(start.left, end.left) + Math.max(start.right, end.right)) / 2;
       this.dom.style.display = "flex";
-      const top = selectionTop - hostRect.top + this.host.scrollTop - TOOLBAR_HEIGHT - TOOLBAR_GAP;
-      const rawLeft = selectionCenterX - hostRect.left + this.host.scrollLeft - this.dom.offsetWidth / 2;
+      const top = at.top - hostRect.top + this.host.scrollTop - TOOLBAR_HEIGHT - TOOLBAR_GAP;
+      const rawLeft = at.left - hostRect.left + this.host.scrollLeft - this.dom.offsetWidth / 2;
       const left = Math.min(
         Math.max(rawLeft, 4),
         Math.max(this.host.clientWidth - this.dom.offsetWidth - 4, 4)
@@ -942,18 +942,161 @@ var YuqueToolbar = class {
     this.dom.remove();
   }
 };
-function buildYuqueToolbar(isEnabled, app) {
+function buildTableToolbar() {
   return import_view.ViewPlugin.fromClass(
-    class extends YuqueToolbar {
+    class extends YuqueTableToolbar {
       constructor(view) {
-        super(view, isEnabled, app);
+        super(view);
       }
     }
   );
 }
 
 // src/yuque/api.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
+
+// src/yuque/rate.ts
+var RATE_LOG_CAPACITY = 50;
+function emptyRateLog() {
+  return {
+    hourKey: "",
+    used: 0,
+    lastAcceptedAt: "",
+    events: [],
+    minCeiling: null,
+    minCeilingAt: "",
+    headerRemaining: null,
+    headerObservedAt: ""
+  };
+}
+function migrateRateLog(raw) {
+  const base = emptyRateLog();
+  if (!raw || typeof raw !== "object") return base;
+  const r = raw;
+  base.hourKey = typeof r.hourKey === "string" ? r.hourKey : "";
+  base.used = typeof r.used === "number" && Number.isFinite(r.used) ? r.used : 0;
+  base.minCeilingAt = typeof r.minCeilingAt === "string" ? r.minCeilingAt : "";
+  base.headerObservedAt = typeof r.headerObservedAt === "string" ? r.headerObservedAt : "";
+  base.lastAcceptedAt = typeof r.lastAcceptedAt === "string" ? r.lastAcceptedAt : "";
+  base.minCeiling = typeof r.minCeiling === "number" && Number.isFinite(r.minCeiling) ? r.minCeiling : null;
+  base.headerRemaining = typeof r.headerRemaining === "number" && Number.isFinite(r.headerRemaining) ? r.headerRemaining : null;
+  if (Array.isArray(r.events)) {
+    base.events = r.events.filter((e) => !!e && typeof e === "object" && typeof e.at === "number").slice(-RATE_LOG_CAPACITY);
+  }
+  return base;
+}
+function hourKeyOf(at) {
+  const d = new Date(at);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}`;
+}
+function parseRateNumber(raw) {
+  if (raw === void 0 || raw === null) return null;
+  const m = String(raw).match(/\d+/);
+  if (!m) return null;
+  const n = Number(m[0]);
+  return Number.isFinite(n) ? n : null;
+}
+function recordResponse(log, info) {
+  const hourKey = hourKeyOf(info.at);
+  if (log.hourKey !== hourKey) {
+    log.hourKey = hourKey;
+    log.used = 0;
+  }
+  log.used += 1;
+  const limit = parseRateNumber(info.limit);
+  const remaining = parseRateNumber(info.remaining);
+  const hadRateHeaders = limit !== null || remaining !== null;
+  if (info.status === 429) {
+    log.events = [
+      ...log.events,
+      { at: info.at, hourKey, used: log.used, path: info.path, via: info.via, hadRateHeaders }
+    ].slice(-RATE_LOG_CAPACITY);
+    if (log.minCeiling === null || log.used < log.minCeiling) {
+      log.minCeiling = log.used;
+      log.minCeilingAt = new Date(info.at).toISOString();
+    }
+  } else {
+    if (info.status > 0) log.lastAcceptedAt = new Date(info.at).toISOString();
+    if (remaining !== null) {
+      log.headerRemaining = remaining;
+      log.headerObservedAt = new Date(info.at).toISOString();
+    }
+  }
+  return log;
+}
+function suggestBudget(log) {
+  if (log.minCeiling === null) return null;
+  return Math.floor(log.minCeiling * 0.8);
+}
+function describeRateLog(log, now = Date.now()) {
+  const out = [];
+  out.push(`\u672C\u5C0F\u65F6\uFF08${log.hourKey || "\u2014"}\uFF09\u5DF2\u53D1\u51FA ${log.used} \u6B21 API \u8BF7\u6C42\uFF08\u56FE\u7247\u8D70 CDN\uFF0C\u4E0D\u8BA1\u5165\uFF09`);
+  if (log.minCeiling === null) {
+    out.push("\u5C1A\u65E0\u89C2\u6D4B\u95E8\u69DB\uFF1A\u672C\u673A\u8FD8\u6CA1\u649E\u5230\u8FC7 429\uFF0C\u6682\u65F6\u65E0\u4ECE\u4F30\u8BA1\u989D\u5EA6\u4E0A\u9650");
+  } else {
+    out.push(
+      `\u89C2\u6D4B\u95E8\u69DB\uFF1A\u5386\u6B21\u649E\u5899\u65F6\u7684\u6700\u5C0F\u7D2F\u8BA1\u8BF7\u6C42\u6570 ${log.minCeiling} \u6B21\uFF08${formatAt(log.minCeilingAt)}\uFF09\u2014\u2014\u8FD9\u662F\u989D\u5EA6\u4E0A\u9650\u7684\u4E0B\u754C\uFF08\u4E0D\u662F\u4E0A\u9650\u672C\u8EAB\uFF09\uFF1B\u82E5\u4E0E\u5176\u5B83 Token / \u5DE5\u5177\u5171\u7528\u989D\u5EA6\uFF0C\u771F\u5B9E\u4E0A\u9650\u66F4\u9AD8`
+    );
+    const s = suggestBudget(log);
+    if (s !== null) {
+      out.push(`\u5EFA\u8BAE\u9884\u7B97\uFF1A${s} \u6B21/\u6B21\u540C\u6B65\uFF08\u89C2\u6D4B\u95E8\u69DB \xD7 0.8\uFF09\uFF1B\u586B\u5165\u300C\u9AD8\u7EA7 \u2192 \u6BCF\u6B21\u540C\u6B65\u8BF7\u6C42\u4E0A\u9650\u300D\u540E\u624D\u751F\u6548`);
+    }
+  }
+  out.push(
+    log.headerRemaining === null ? "\u4ECE\u672A\u5728\u54CD\u5E94\u5934\u91CC\u8BFB\u5230 X-RateLimit-Remaining\uFF08\u5B98\u65B9\u6587\u6863\u79F0\u4F1A\u8FD4\u56DE\uFF0C\u5B9E\u6D4B\u672A\u89C1\uFF09" : `\u6700\u8FD1\u4E00\u6B21\u8BFB\u5230\u7684\u5269\u4F59\u989D\u5EA6\uFF1A${log.headerRemaining}\uFF08${formatAt(log.headerObservedAt)}\uFF09`
+  );
+  if (log.lastAcceptedAt) {
+    out.push(`\u6700\u540E\u4E00\u6B21\u672A\u88AB\u7F51\u5173\u62E6\u622A\u7684\u8BF7\u6C42\uFF1A${formatAt(log.lastAcceptedAt)}`);
+  }
+  const lastEvent = log.events[log.events.length - 1];
+  if (lastEvent) {
+    const bound = log.lastAcceptedAt ? `\u8D77\u70B9\u5728 ${formatAt(log.lastAcceptedAt)} \u4E4B\u540E\u3001${new Date(lastEvent.at).toLocaleString()} \u4E4B\u524D` : "\u8D77\u70B9\u672A\u77E5\uFF08\u672C\u5730\u6CA1\u6709\u66F4\u65E9\u7684\u653E\u884C\u8BB0\u5F55\uFF09";
+    out.push(`\u6700\u8FD1\u4E00\u6B21 429 \u8DDD\u4ECA ${formatDuration(now - lastEvent.at)}\uFF08${bound}\uFF09`);
+  }
+  const recent = log.events.slice(-3);
+  if (recent.length > 0) {
+    out.push("\u6700\u8FD1 429\uFF1A");
+    for (const e of recent) {
+      out.push(
+        `  \xB7 ${new Date(e.at).toLocaleString()} ${e.path}\uFF08\u5F53\u5C0F\u65F6\u7B2C ${e.used} \u6B21\uFF0C${e.hadRateHeaders ? "\u5E26\u914D\u989D\u5934" : "\u65E0\u914D\u989D\u5934"}${e.via ? `\uFF0Cvia ${e.via}` : ""}\uFF09`
+      );
+    }
+  }
+  return out;
+}
+function formatAt(iso) {
+  if (!iso) return "\u2014";
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? new Date(t).toLocaleString() : iso;
+}
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "\u2014";
+  const min = Math.floor(ms / 6e4);
+  if (min < 60) return `${min} \u5206\u949F`;
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m > 0 ? `${h} \u5C0F\u65F6 ${m} \u5206\u949F` : `${h} \u5C0F\u65F6`;
+}
+function decideBudget(opts) {
+  const candidates = [];
+  if (opts.headerRemaining !== null) candidates.push({ v: opts.headerRemaining, src: "header" });
+  if (opts.setting > 0) candidates.push({ v: opts.setting - opts.usedThisRun, src: "setting" });
+  if (candidates.length === 0) return { allowance: null, source: "none" };
+  candidates.sort((a, b) => a.v - b.v);
+  return { allowance: Math.max(0, candidates[0].v), source: candidates[0].src };
+}
+function budgetSourceLabel(source) {
+  if (source === "header") return "\u6765\u81EA\u54CD\u5E94\u5934\u7684\u5269\u4F59\u989D\u5EA6";
+  if (source === "setting") return "\u6765\u81EA\u8BBE\u7F6E\u9879\u300C\u6BCF\u6B21\u540C\u6B65\u8BF7\u6C42\u4E0A\u9650\u300D";
+  return "\u672A\u8BBE\u4E0A\u9650";
+}
+function headerDump(headers) {
+  if (!headers) return [];
+  return Object.keys(headers).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())).map((k) => `${k}: ${headers[k]}`);
+}
+
+// src/yuque/api.ts
 var BASE = "https://www.yuque.com/api/v2";
 function nsPath(namespace) {
   return String(namespace).split("/").map(encodeURIComponent).join("/");
@@ -966,10 +1109,49 @@ var YuqueApiError = class extends Error {
     this.name = "YuqueApiError";
   }
 };
+var YuqueQuotaError = class extends YuqueApiError {
+  constructor(path, rate) {
+    var _a;
+    super(
+      `\u8BED\u96C0 API \u914D\u989D\u5DF2\u7528\u5C3D\uFF08429\uFF0C${path}\uFF09\uFF1A\u8BE5\u9650\u5236\u6309\u8D26\u53F7/\u56E2\u961F\u7EF4\u5EA6\u751F\u6548\uFF08\u540C\u4E00\u8D26\u53F7\u4E0B\u6240\u6709 Token \u5171\u4EAB\uFF09\uFF0C\u4E0D\u662F Token \u5931\u6548\u6216\u6743\u9650\u4E0D\u8DB3\uFF08Token \u8303\u56F4\uFF1A${(_a = rate == null ? void 0 : rate.scopes) != null ? _a : "\u672A\u77E5"}\uFF09\u3002\u5B98\u65B9\u8BB0\u8F7D 5000 \u6B21/\u5C0F\u65F6\uFF0C\u4F46\u5B9E\u6D4B\u8BE5 429 \u7531\u7F51\u5173\u5410\u51FA\u4E14\u4E0D\u5E26 X-RateLimit-*\uFF0C\u6062\u590D\u5468\u671F\u672A\u786E\u5B9A\u3002\u5DF2\u5B8C\u6210\u7684\u6587\u6863\u5DF2\u4FDD\u5B58\uFF0C\u7A0D\u540E\u518D\u6267\u884C\u540C\u6B65\u4F1A\u81EA\u52A8\u4ECE\u672A\u5B8C\u6210\u5904\u7EE7\u7EED\u3002`,
+      429
+    );
+    this.path = path;
+    this.rate = rate;
+    this.name = "YuqueQuotaError";
+  }
+};
+function isQuotaExhausted(e) {
+  return e instanceof YuqueQuotaError;
+}
+function pickHeader(headers, name) {
+  if (!headers) return void 0;
+  const want = name.toLowerCase();
+  for (const k of Object.keys(headers)) {
+    if (k.toLowerCase() === want) {
+      const v = headers[k];
+      return v === void 0 || v === null ? void 0 : String(v);
+    }
+  }
+  return void 0;
+}
 var YuqueApi = class {
-  constructor(token) {
+  constructor(token, onRate) {
     this.token = token;
+    this.onRate = onRate;
     this.lastReqAt = 0;
+    /** 最近一次请求的限流/权限线索，供诊断命令读取 */
+    this.lastRateInfo = null;
+    /**
+     * 本次运行已发出的开放 API 请求数（图片下载走 CDN、不带 Token，故不计入）。
+     * 供预算判定使用：用户设了「每次同步请求上限」时，用它算已用掉多少。
+     */
+    this.requestCount = 0;
+  }
+  /** 最近一次响应头里读到的剩余额度；读不到（或不是数字）返回 null */
+  get remainingFromHeader() {
+    var _a;
+    return parseRateNumber((_a = this.lastRateInfo) == null ? void 0 : _a.remaining);
   }
   setToken(token) {
     this.token = token;
@@ -981,11 +1163,11 @@ var YuqueApi = class {
     this.lastReqAt = Date.now();
   }
   /**
-   * requestUrl 对非 2xx 默认直接抛异常（"Request failed, status xxx"），
-   * 必须设置 throw: false 才能拿到响应自行判断状态码。
+   * Obsidian requestUrl 的响应形状（只声明用到的字段；headers 大小写不保证）。
+   * json 只在诊断文案（message）与取 data 两处被读，其余一律当 unknown 处理。
    */
-  async rawRequest(path) {
-    return await (0, import_obsidian4.requestUrl)({
+  async send(path) {
+    const res = await (0, import_obsidian5.requestUrl)({
       url: BASE + path,
       method: "GET",
       headers: {
@@ -994,29 +1176,44 @@ var YuqueApi = class {
       },
       throw: false
     });
+    this.captureRate(path, res);
+    return res;
+  }
+  /** 把响应头里的限流/权限线索记下来（语雀只在头里给这些信息） */
+  captureRate(path, res) {
+    var _a;
+    this.requestCount++;
+    this.lastRateInfo = {
+      path,
+      status: res.status,
+      at: Date.now(),
+      via: pickHeader(res.headers, "via"),
+      scopes: pickHeader(res.headers, "x-oauth-scopes"),
+      retryAfter: pickHeader(res.headers, "retry-after"),
+      limit: pickHeader(res.headers, "x-ratelimit-limit"),
+      remaining: pickHeader(res.headers, "x-ratelimit-remaining"),
+      reset: pickHeader(res.headers, "x-ratelimit-reset")
+    };
+    (_a = this.onRate) == null ? void 0 : _a.call(this, this.lastRateInfo);
   }
   async requestJson(path, onRetry) {
     var _a, _b, _c, _d;
-    const maxAttempts = 4;
-    const backoffMs = [5e3, 15e3, 3e4];
+    const maxAttempts = 2;
+    const quotaProbeMs = 2e3;
     for (let attempt = 1; ; attempt++) {
       await this.throttle();
       let res;
       try {
-        res = await this.rawRequest(path);
+        res = await this.send(path);
       } catch (e) {
         throw new YuqueApiError(`\u8BF7\u6C42\u5F02\u5E38\uFF08${path}\uFF09\uFF1A${e.message}`, 0);
       }
       if (res.status === 429) {
         if (attempt >= maxAttempts) {
-          throw new YuqueApiError(
-            `\u8BED\u96C0 API \u9650\u6D41\uFF08429\uFF0C${path}\uFF09\uFF1A\u5DF2\u81EA\u52A8\u91CD\u8BD5 ${maxAttempts - 1} \u6B21\u4ECD\u5931\u8D25\u3002\u8BED\u96C0\u5BF9 API \u8C03\u7528\u6709\u5C0F\u65F6\u7EA7\u914D\u989D\uFF08\u514D\u8D39\u8D26\u6237\u8F83\u4F4E\uFF09\uFF0C\u8BF7\u7B49\u5F85 10-60 \u5206\u949F\u540E\u518D\u540C\u6B65`,
-            429
-          );
+          throw new YuqueQuotaError(path, (_a = this.lastRateInfo) != null ? _a : void 0);
         }
-        const wait = (_a = backoffMs[attempt - 1]) != null ? _a : 3e4;
-        onRetry == null ? void 0 : onRetry(Math.round(wait / 1e3), attempt);
-        await sleep(wait);
+        onRetry == null ? void 0 : onRetry(Math.round(quotaProbeMs / 1e3), attempt);
+        await sleep(quotaProbeMs);
         this.lastReqAt = 0;
         continue;
       }
@@ -1030,11 +1227,7 @@ var YuqueApi = class {
         );
       }
       if (res.status >= 400) {
-        let msg = `HTTP ${res.status}`;
-        try {
-          msg = (_c = (_b = res.json) == null ? void 0 : _b.message) != null ? _c : msg;
-        } catch (e) {
-        }
+        const msg = (_c = (_b = res.json) == null ? void 0 : _b.message) != null ? _c : `HTTP ${res.status}`;
         throw new YuqueApiError(`\u8BED\u96C0 API \u8BF7\u6C42\u5931\u8D25\uFF08${path}\uFF09\uFF1A${msg}`, res.status);
       }
       return (_d = res.json) == null ? void 0 : _d.data;
@@ -1119,23 +1312,19 @@ var YuqueApi = class {
     const data = await this.requestJson(`/repos/${nsPath(namespace)}/toc`, onRetry);
     return Array.isArray(data) ? data : [];
   }
-  /** 诊断用：原始请求，返回状态码与响应体文本（不做任何解析兜底） */
+  /**
+   * 诊断用：原始请求，返回状态码、响应体文本与**响应头**（不做任何解析兜底）。
+   * 响应头是诊断的关键：x-oauth-scopes 能证明 Token 权限是否齐全，
+   * via 能说明 429 是网关层还是应用层吐的——这两点是本插件踩过的最大的坑。
+   */
   async getRaw(path) {
-    var _a;
+    var _a, _b;
     await this.throttle();
     let res;
     try {
-      res = await (0, import_obsidian4.requestUrl)({
-        url: BASE + path,
-        method: "GET",
-        headers: {
-          "X-Auth-Token": this.token,
-          "User-Agent": "obsidian-yuque-style"
-        },
-        throw: false
-      });
+      res = await this.send(path);
     } catch (e) {
-      return { status: 0, text: `\u7F51\u7EDC\u5F02\u5E38\uFF1A${e.message}` };
+      return { status: 0, text: `\u7F51\u7EDC\u5F02\u5E38\uFF1A${e.message}`, headers: {} };
     }
     let text = "";
     try {
@@ -1143,19 +1332,22 @@ var YuqueApi = class {
     } catch (e) {
       text = "<\u65E0\u6CD5\u8BFB\u53D6\u54CD\u5E94\u4F53>";
     }
-    return { status: res.status, text };
+    return { status: res.status, text, headers: (_b = res.headers) != null ? _b : {} };
   }
   /** 下载二进制资源（图片/附件） */
   async downloadBinary(url) {
     await this.throttle();
-    const res = await (0, import_obsidian4.requestUrl)({ url, method: "GET", throw: false });
+    const res = await (0, import_obsidian5.requestUrl)({ url, method: "GET", throw: false });
     if (res.status >= 400) throw new YuqueApiError(`\u8D44\u6E90\u4E0B\u8F7D\u5931\u8D25\uFF08${res.status}\uFF09\uFF1A${url}`, res.status);
     return res.arrayBuffer;
   }
 };
 
+// src/yuque/ui.ts
+var import_obsidian10 = require("obsidian");
+
 // src/yuque/sync.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // src/yuque/lake.ts
 var CALLOUT_STATUS_MAP = {
@@ -1551,7 +1743,8 @@ ${body}`;
           return new _LakeConverter().convert(html).markdown.trim();
         }
         if (Array.isArray(value.items)) {
-          return value.items.map((it) => `- [${it.checked ? "x" : " "}] ${it.title || ""}`).join("\n");
+          const items = value.items;
+          return items.map((it) => `- [${it.checked ? "x" : " "}] ${it.title || ""}`).join("\n");
         }
         return null;
       }
@@ -2066,7 +2259,7 @@ function findTitleMatches(app, folder, title) {
   return app.vault.getMarkdownFiles().map((f) => f.path).filter((p) => p.startsWith(prefix) && (p === `${prefix}${name}` || p.endsWith(`/${name}`))).map((p) => p.slice(0, -3));
 }
 async function ensureFolder(app, folder) {
-  const path = (0, import_obsidian5.normalizePath)(folder);
+  const path = (0, import_obsidian6.normalizePath)(folder);
   if (!path || path === "/" || path === ".") return;
   const parts = path.split("/");
   let cur = "";
@@ -2082,7 +2275,7 @@ async function ensureFolder(app, folder) {
   }
 }
 function joinPath(...parts) {
-  return (0, import_obsidian5.normalizePath)(
+  return (0, import_obsidian6.normalizePath)(
     parts.filter((p) => p && p.trim() && p !== "/" && p !== ".").join("/")
   );
 }
@@ -2139,8 +2332,8 @@ async function backupDocFile(app, ns, doc, content) {
 }
 async function pruneBackups(app, dir) {
   const folder = app.vault.getAbstractFileByPath(dir);
-  if (!(folder instanceof import_obsidian5.TFolder)) return;
-  const files = folder.children.filter((f) => f instanceof import_obsidian5.TFile);
+  if (!(folder instanceof import_obsidian6.TFolder)) return;
+  const files = folder.children.filter((f) => f instanceof import_obsidian6.TFile);
   if (files.length <= BACKUP_KEEP) return;
   files.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
   for (const f of files.slice(0, files.length - BACKUP_KEEP)) {
@@ -2150,11 +2343,9 @@ async function pruneBackups(app, dir) {
     }
   }
 }
-async function syncTask(plugin, api, task, log, signal) {
-  var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j;
-  const settings = plugin.settings;
+async function fetchTocAndDocs(api, task, retryLog, log) {
+  var _a;
   const ns = task.namespace;
-  const retryLog = (waitSec, attempt) => log(`\u8BED\u96C0 API \u9650\u6D41\uFF0C${waitSec} \u79D2\u540E\u81EA\u52A8\u91CD\u8BD5\uFF08\u7B2C ${attempt} \u6B21\uFF09\u2026`);
   log(`\u6B63\u5728\u83B7\u53D6\u77E5\u8BC6\u5E93\u76EE\u5F55\u300C${task.repoName}\u300D\u2026`);
   let toc = await api.getToc(ns, retryLog);
   let docList = await api.getDocListOnce(ns);
@@ -2185,59 +2376,48 @@ async function syncTask(plugin, api, task, log, signal) {
       log(`ID \u8BBF\u95EE\u5931\u8D25\uFF1A${e.message}`, "error");
     }
   }
-  const tocFolders = buildTocFolders(toc);
-  log(`\u76EE\u5F55\uFF08TOC\uFF09\u8282\u70B9\u6570\uFF1A${toc.length}`);
-  const docBySlug = /* @__PURE__ */ new Map();
-  for (const d of docList) docBySlug.set(d.slug, d);
-  if (docList.length === 0 && toc.length > 0) {
-    const tocDocs = toc.filter((n) => n.type === "DOC" && n.slug).map((n) => ({
-      id: 0,
-      slug: n.slug,
-      title: n.title,
-      updated_at: ""
-    }));
-    if (tocDocs.length > 0) {
-      log(`\u6587\u6863\u5217\u8868\u4E3A\u7A7A\uFF0C\u6539\u6309\u76EE\u5F55\u8282\u70B9\u540C\u6B65 ${tocDocs.length} \u7BC7\u6587\u6863\u2026`);
-      for (const d of tocDocs) {
-        if (!docBySlug.has(d.slug)) {
-          docBySlug.set(d.slug, d);
-          docList.push(d);
-        }
+  return { toc, docList };
+}
+function applyTocFallback(toc, docList, docBySlug, log) {
+  const tocDocs = toc.filter((n) => n.type === "DOC" && n.slug).map((n) => ({
+    id: 0,
+    slug: n.slug,
+    title: n.title,
+    updated_at: ""
+  }));
+  if (tocDocs.length > 0) {
+    log(`\u6587\u6863\u5217\u8868\u4E3A\u7A7A\uFF0C\u6539\u6309\u76EE\u5F55\u8282\u70B9\u540C\u6B65 ${tocDocs.length} \u7BC7\u6587\u6863\u2026`);
+    for (const d of tocDocs) {
+      if (!docBySlug.has(d.slug)) {
+        docBySlug.set(d.slug, d);
+        docList.push(d);
       }
     }
   }
-  if (docList.length === 0) {
-    log(
-      `\u26A0 \u76EE\u5F55\u4E0E\u6587\u6863\u5217\u8868\u5747\u4E3A\u7A7A\uFF1A\u300C${task.repoName}\u300D\u53EF\u80FD\u662F\u7A7A\u77E5\u8BC6\u5E93\uFF0C\u6216 Token \u65E0\u6743\u8BFB\u53D6\u5B83\u3002\u8BF7\u786E\u8BA4\u8BE5\u77E5\u8BC6\u5E93\u5728\u8BED\u96C0\u7F51\u9875\u4E2D\u786E\u5B9E\u6709\u6587\u6863\uFF0C\u4E14 Token \u52FE\u9009\u4E86\u8BFB\u53D6\u6743\u9650`,
-      "error"
-    );
-  }
-  let targets;
+}
+function resolveTargets(task, toc, docList, docBySlug, log) {
   if (task.mode === "selected") {
-    targets = task.selectedDocs.map((sd) => docBySlug.get(sd.slug)).filter((d) => !!d);
+    const targets = task.selectedDocs.map((sd) => docBySlug.get(sd.slug)).filter((d) => !!d);
     const missing = task.selectedDocs.filter((sd) => !docBySlug.has(sd.slug));
     if (missing.length > 0) log(`\u8B66\u544A\uFF1A${missing.length} \u7BC7\u6240\u9009\u6587\u6863\u5DF2\u4E0D\u5B58\u5728`, "error");
-  } else {
-    const tocOrder = /* @__PURE__ */ new Map();
-    toc.forEach((n, i) => {
-      if (n.slug && !tocOrder.has(n.slug)) tocOrder.set(n.slug, i);
-    });
-    const inToc = [];
-    const notInToc = [];
-    for (const d of docList) (tocOrder.has(d.slug) ? inToc : notInToc).push(d);
-    inToc.sort((a, b) => {
-      var _a2, _b2;
-      return ((_a2 = tocOrder.get(a.slug)) != null ? _a2 : 0) - ((_b2 = tocOrder.get(b.slug)) != null ? _b2 : 0);
-    });
-    targets = [...inToc, ...notInToc];
-    if (notInToc.length > 0) log(`${notInToc.length} \u7BC7\u6587\u6863\u672A\u52A0\u5165\u8BED\u96C0\u76EE\u5F55\uFF0C\u6392\u5728\u6700\u540E`);
+    return targets;
   }
-  const state = settings.yuqueSyncState || {};
-  const persistState = async () => {
-    settings.yuqueSyncState = state;
-    await plugin.saveSettings();
-  };
-  const colorMode = settings.yuqueTextColor || "drop";
+  const tocOrder = /* @__PURE__ */ new Map();
+  toc.forEach((n, i) => {
+    if (n.slug && !tocOrder.has(n.slug)) tocOrder.set(n.slug, i);
+  });
+  const inToc = [];
+  const notInToc = [];
+  for (const d of docList) (tocOrder.has(d.slug) ? inToc : notInToc).push(d);
+  inToc.sort((a, b) => {
+    var _a, _b;
+    return ((_a = tocOrder.get(a.slug)) != null ? _a : 0) - ((_b = tocOrder.get(b.slug)) != null ? _b : 0);
+  });
+  if (notInToc.length > 0) log(`${notInToc.length} \u7BC7\u6587\u6863\u672A\u52A0\u5165\u8BED\u96C0\u76EE\u5F55\uFF0C\u6392\u5728\u6700\u540E`);
+  return [...inToc, ...notInToc];
+}
+async function planPending(plugin, task, ns, state, tocFolders, targets, log) {
+  var _a, _b, _c, _d;
   const pending = [];
   let skipped = 0;
   let relocated = 0;
@@ -2246,7 +2426,7 @@ async function syncTask(plugin, api, task, log, signal) {
     const rec = state[key];
     let resolvedPath = (rec == null ? void 0 : rec.path) || "";
     let file = resolvedPath ? plugin.app.vault.getAbstractFileByPath(`${resolvedPath}.md`) : null;
-    if (!(file instanceof import_obsidian5.TFile)) {
+    if (!(file instanceof import_obsidian6.TFile)) {
       resolvedPath = joinPath(
         task.targetFolder,
         tocFolders.get(d.slug) || "",
@@ -2254,13 +2434,13 @@ async function syncTask(plugin, api, task, log, signal) {
       );
       file = plugin.app.vault.getAbstractFileByPath(`${resolvedPath}.md`);
     }
-    const tocFolder = tocFolders.has(d.slug) ? (_b = tocFolders.get(d.slug)) != null ? _b : "" : null;
-    let prevFolder = (_c = rec == null ? void 0 : rec.folder) != null ? _c : null;
+    const tocFolder = tocFolders.has(d.slug) ? (_a = tocFolders.get(d.slug)) != null ? _a : "" : null;
+    let prevFolder = (_b = rec == null ? void 0 : rec.folder) != null ? _b : null;
     if (prevFolder === null && tocFolder !== null) {
       prevFolder = folderOfPath(resolvedPath, task.targetFolder);
     }
-    let folder = (_d = tocFolder != null ? tocFolder : rec == null ? void 0 : rec.folder) != null ? _d : null;
-    if (file instanceof import_obsidian5.TFile && tocFolder !== null && prevFolder !== null) {
+    let folder = (_c = tocFolder != null ? tocFolder : rec == null ? void 0 : rec.folder) != null ? _c : null;
+    if (file instanceof import_obsidian6.TFile && tocFolder !== null && prevFolder !== null) {
       const movedTo = followTocFolderMove(resolvedPath, prevFolder, tocFolder);
       if (movedTo) {
         try {
@@ -2272,14 +2452,14 @@ async function syncTask(plugin, api, task, log, signal) {
           resolvedPath = movedTo;
           relocated++;
           const after = plugin.app.vault.getAbstractFileByPath(`${movedTo}.md`);
-          if (after instanceof import_obsidian5.TFile) file = after;
+          if (after instanceof import_obsidian6.TFile) file = after;
         } catch (e) {
           log(`  \u26A0 \u5206\u7EC4\u8DDF\u968F\u5931\u8D25\u300C${d.title}\u300D\uFF1A${e.message}`, "error");
-          folder = (_e = rec == null ? void 0 : rec.folder) != null ? _e : null;
+          folder = (_d = rec == null ? void 0 : rec.folder) != null ? _d : null;
         }
       }
     }
-    if (rec && rec.updatedAt === d.updated_at && file instanceof import_obsidian5.TFile) {
+    if (rec && rec.updatedAt === d.updated_at && file instanceof import_obsidian6.TFile) {
       state[key] = {
         updatedAt: rec.updatedAt,
         path: resolvedPath,
@@ -2294,14 +2474,25 @@ async function syncTask(plugin, api, task, log, signal) {
     }
     pending.push({ doc: d, basePath: resolvedPath, folder });
   }
-  log(`\u5171 ${targets.length} \u7BC7\uFF0C\u9700\u66F4\u65B0 ${pending.length} \u7BC7\uFF0C\u8DF3\u8FC7\u672A\u53D8\u5316 ${skipped} \u7BC7`);
+  return { pending, skipped, relocated };
+}
+async function fetchAndStage(api, ns, pending, colorMode, budgetStopped, log, signal, persistState) {
+  var _a, _b;
   const staged = [];
+  let quotaExhausted = false;
+  let quotaRemaining = 0;
   for (const { doc: d, basePath, folder } of pending) {
     if (signal == null ? void 0 : signal.aborted) {
       log("\u5DF2\u505C\u6B62\uFF1B\u6B63\u5728\u4FDD\u5B58\u5DF2\u540C\u6B65\u8BB0\u5F55\u2026");
       await persistState();
-      return;
+      return {
+        staged,
+        quotaExhausted,
+        quotaRemaining,
+        aborted: { stop: "aborted", remainingDocs: pending.length - staged.length }
+      };
     }
+    if (quotaExhausted || budgetStopped) break;
     try {
       const detail = await api.getDoc(ns, d.slug);
       const result = convertYuqueBody(detail.body || "", colorMode);
@@ -2309,7 +2500,7 @@ async function syncTask(plugin, api, task, log, signal) {
         [FM.title]: detail.title,
         [FM.source]: `https://www.yuque.com/${ns}/${d.slug}`,
         // 文档 ID 与创建时间：详情接口与列表接口都带，列表项作回退
-        [FM.id]: String((_g = (_f = detail.id) != null ? _f : d.id) != null ? _g : ""),
+        [FM.id]: String((_b = (_a = detail.id) != null ? _a : d.id) != null ? _b : ""),
         [FM.createdAt]: detail.created_at || d.created_at || "",
         [FM.updatedAt]: detail.updated_at,
         [FM.tags]: yuqueTagNames(detail.tags)
@@ -2325,17 +2516,25 @@ async function syncTask(plugin, api, task, log, signal) {
       });
       for (const w of result.warnings) log(`  \u26A0 ${d.title}\uFF1A${w}`);
     } catch (e) {
+      if (isQuotaExhausted(e)) {
+        quotaExhausted = true;
+        quotaRemaining = pending.length - staged.length;
+        log(e.message, "error");
+        log(
+          `\u26A0 \u914D\u989D\u5DF2\u7528\u5C3D\uFF1A\u5DF2\u62C9\u5230 ${staged.length} \u7BC7\uFF0C\u5269\u4F59 ${quotaRemaining} \u7BC7\u672C\u6B21\u4E0D\u518D\u5C1D\u8BD5\u3002\u4E0B\u9762\u4F1A\u628A\u5DF2\u62C9\u5230\u7684\u5185\u5BB9\u6B63\u5E38\u5199\u5165\u5E76\u4FDD\u5B58\u8BB0\u5F55\u3002`,
+          "error"
+        );
+        break;
+      }
       log(`\u62C9\u53D6\u5931\u8D25\u300C${d.title}\u300D\uFF1A${e.message}`, "error");
     }
   }
-  if (staged.length === 0) {
-    log("\u6CA1\u6709\u9700\u8981\u5199\u5165\u7684\u6587\u6863", "info");
-  }
-  const slugToTitle = /* @__PURE__ */ new Map();
-  for (const t of targets) slugToTitle.set(t.slug, sanitizeFileName(t.title));
+  return { staged, quotaExhausted, quotaRemaining, aborted: null };
+}
+function convertInternalLinks(plugin, ns, pending, staged, log) {
   const vaultDocs = collectVaultDocs(plugin.app);
   const linkIndex = buildLinkIndex(vaultDocs);
-  mergeStateIntoIndex(linkIndex, settings.yuqueSyncState);
+  mergeStateIntoIndex(linkIndex, plugin.settings.yuqueSyncState);
   const extraNames = [];
   for (const { doc: pendingDoc, basePath } of pending) {
     const key = stateKey(ns, pendingDoc.slug);
@@ -2354,42 +2553,43 @@ async function syncTask(plugin, api, task, log, signal) {
     doc.content = converted.content;
     linksConverted += converted.converted;
   }
-  if (linksConverted > 0) {
-    log(`\u5DF2\u628A ${linksConverted} \u6761\u8BED\u96C0\u6587\u6863\u94FE\u63A5\u8F6C\u4E3A\u672C\u5730\u53CC\u94FE`);
-  }
-  if (settings.yuqueDownloadImages) {
-    const assetsRoot = joinPath(task.targetFolder, settings.yuqueAssetsFolder || "assets");
-    await ensureFolder(plugin.app, assetsRoot);
-    let done = 0;
-    for (const doc of staged) {
-      const matches = Array.from(doc.content.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
-      for (const m of matches) {
-        const [full, alt, url] = m;
-        if (!/yuque|nlark|alicdn/.test(url)) continue;
-        const ext = imageExtFromUrl(url);
-        const fileName = `yuque-${hashUrl(url)}.${ext}`;
-        const assetPath = `${assetsRoot}/${fileName}`;
-        try {
-          if (!await plugin.app.vault.adapter.exists(assetPath)) {
-            const buf = await api.downloadBinary(url);
-            await plugin.app.vault.adapter.writeBinary(assetPath, buf);
-          }
-          const docFolder = doc.basePath.includes("/") ? doc.basePath.slice(0, doc.basePath.lastIndexOf("/")) : "";
-          let rel = (0, import_obsidian5.normalizePath)(assetsRoot);
-          if (docFolder) {
-            const up = docFolder.split("/").length;
-            rel = "../".repeat(up) + assetsRoot;
-          }
-          rel = (0, import_obsidian5.normalizePath)(rel) + "/" + fileName;
-          doc.content = doc.content.split(full).join(`![${alt}](${encodeLinkTarget(rel)})`);
-          done++;
-        } catch (e) {
-          log(`  \u26A0 \u56FE\u7247\u4E0B\u8F7D\u5931\u8D25\uFF08\u4FDD\u7559\u8FDC\u7A0B\u94FE\u63A5\uFF09\uFF1A${e.message}`, "error");
+  return { linkIndex, linkCounts, linksConverted };
+}
+async function localizeImages(plugin, api, task, staged, log) {
+  const assetsRoot = joinPath(task.targetFolder, plugin.settings.yuqueAssetsFolder || "assets");
+  await ensureFolder(plugin.app, assetsRoot);
+  let done = 0;
+  for (const doc of staged) {
+    const matches = Array.from(doc.content.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
+    for (const m of matches) {
+      const [full, alt, url] = m;
+      if (!/yuque|nlark|alicdn/.test(url)) continue;
+      const ext = imageExtFromUrl(url);
+      const fileName = `yuque-${hashUrl(url)}.${ext}`;
+      const assetPath = `${assetsRoot}/${fileName}`;
+      try {
+        if (!await plugin.app.vault.adapter.exists(assetPath)) {
+          const buf = await api.downloadBinary(url);
+          await plugin.app.vault.adapter.writeBinary(assetPath, buf);
         }
+        const docFolder = doc.basePath.includes("/") ? doc.basePath.slice(0, doc.basePath.lastIndexOf("/")) : "";
+        let rel = (0, import_obsidian6.normalizePath)(assetsRoot);
+        if (docFolder) {
+          const up = docFolder.split("/").length;
+          rel = "../".repeat(up) + assetsRoot;
+        }
+        rel = (0, import_obsidian6.normalizePath)(rel) + "/" + fileName;
+        doc.content = doc.content.split(full).join(`![${alt}](${encodeLinkTarget(rel)})`);
+        done++;
+      } catch (e) {
+        log(`  \u26A0 \u56FE\u7247\u4E0B\u8F7D\u5931\u8D25\uFF08\u4FDD\u7559\u8FDC\u7A0B\u94FE\u63A5\uFF09\uFF1A${e.message}`, "error");
       }
     }
-    if (done > 0) log(`\u5DF2\u672C\u5730\u5316 ${done} \u5F20\u56FE\u7247 \u2192 ${assetsRoot}/`);
   }
+  if (done > 0) log(`\u5DF2\u672C\u5730\u5316 ${done} \u5F20\u56FE\u7247 \u2192 ${assetsRoot}/`);
+}
+async function writeStaged(plugin, task, ns, state, staged, quotaRemaining, log, signal, persistState) {
+  var _a;
   let written = 0;
   let unchanged = 0;
   let backedUp = 0;
@@ -2398,7 +2598,13 @@ async function syncTask(plugin, api, task, log, signal) {
     if (signal == null ? void 0 : signal.aborted) {
       log(`\u5DF2\u505C\u6B62\uFF1B\u5DF2\u5199\u5165 ${written} \u7BC7\uFF0C\u6B63\u5728\u4FDD\u5B58\u8BB0\u5F55\u2026`);
       await persistState();
-      return;
+      return {
+        written,
+        unchanged,
+        backedUp,
+        moved,
+        aborted: { stop: "aborted", remainingDocs: quotaRemaining }
+      };
     }
     const filePath = `${doc.basePath}.md`;
     try {
@@ -2412,7 +2618,7 @@ async function syncTask(plugin, api, task, log, signal) {
         const from = pickRelocateSource((rec == null ? void 0 : rec.path) || "", doc.basePath, titleMatches);
         if (from && from !== doc.basePath) {
           const stale = plugin.app.vault.getAbstractFileByPath(`${from}.md`);
-          if (stale instanceof import_obsidian5.TFile) {
+          if (stale instanceof import_obsidian6.TFile) {
             await plugin.app.vault.rename(stale, filePath);
             log(`\u300C${doc.title}\u300D\u4F4D\u7F6E\u8DDF\u968F\u8BED\u96C0\u76EE\u5F55\uFF1A${from} \u2192 ${doc.basePath}`);
             moved++;
@@ -2423,7 +2629,7 @@ async function syncTask(plugin, api, task, log, signal) {
           (p) => p !== doc.basePath
         );
         const leftover = others.find(
-          (p) => plugin.app.vault.getAbstractFileByPath(`${p}.md`) instanceof import_obsidian5.TFile
+          (p) => plugin.app.vault.getAbstractFileByPath(`${p}.md`) instanceof import_obsidian6.TFile
         );
         if (leftover) {
           log(
@@ -2433,15 +2639,15 @@ async function syncTask(plugin, api, task, log, signal) {
         }
       }
       const existing = plugin.app.vault.getAbstractFileByPath(filePath);
-      const existingFile = existing instanceof import_obsidian5.TFile ? existing : null;
+      const existingFile = existing instanceof import_obsidian6.TFile ? existing : null;
       const current = existingFile ? await plugin.app.vault.read(existingFile) : null;
       const decision = decideWrite({
         exists: existingFile !== null,
         currentContent: current,
         nextContent: doc.content,
-        knownHash: (_h = state[key]) == null ? void 0 : _h.hash
+        knownHash: (_a = state[key]) == null ? void 0 : _a.hash
       });
-      if (decision === "backup-overwrite" && settings.yuqueBackupOnConflict) {
+      if (decision === "backup-overwrite" && plugin.settings.yuqueBackupOnConflict) {
         const backupPath = await backupDocFile(plugin.app, ns, doc, current != null ? current : "");
         log(`\u300C${doc.title}\u300D\u672C\u5730\u5DF2\u6539\u52A8\uFF0C\u5907\u4EFD\u539F\u5185\u5BB9 \u2192 ${backupPath}`);
         backedUp++;
@@ -2467,60 +2673,172 @@ async function syncTask(plugin, api, task, log, signal) {
       log(`\u5199\u5165\u5931\u8D25\u300C${doc.title}\u300D\uFF1A${e.message}`, "error");
     }
   }
-  await persistState();
-  log(
-    `\u300C${task.repoName}\u300D\u5B8C\u6210\uFF1A\u5199\u5165/\u66F4\u65B0 ${written} \u7BC7` + (unchanged > 0 ? `\uFF0C\u5185\u5BB9\u672A\u53D8 ${unchanged} \u7BC7` : "") + (relocated > 0 ? `\uFF0C\u5206\u7EC4\u8DDF\u968F\u8BED\u96C0 ${relocated} \u7BC7` : "") + (moved > 0 ? `\uFF0C\u4F4D\u7F6E\u8DDF\u968F ${moved} \u7BC7` : "") + (backedUp > 0 ? `\uFF0C\u51B2\u7A81\u5907\u4EFD ${backedUp} \u7BC7` : ""),
-    "success"
-  );
-  if (toc.length > 0 && task.mode === "all") {
-    try {
-      const slugToTitle2 = /* @__PURE__ */ new Map();
-      for (const t of targets) slugToTitle2.set(t.slug, sanitizeFileName(t.title));
-      const byUuid = /* @__PURE__ */ new Map();
-      for (const n of toc) byUuid.set(n.uuid, n);
-      const lines = [`# ${task.repoName} \xB7 \u77E5\u8BC6\u5E93\u76EE\u5F55`, ""];
-      for (const n of toc) {
-        let depth = 0;
-        let cur = n;
-        const guard = /* @__PURE__ */ new Set();
-        while ((cur == null ? void 0 : cur.parent_uuid) && !guard.has(cur.parent_uuid)) {
-          guard.add(cur.parent_uuid);
-          cur = byUuid.get(cur.parent_uuid);
-          depth++;
-        }
-        const indent = "  ".repeat(depth);
-        if (n.type === "DOC" && n.slug && slugToTitle2.has(n.slug)) {
-          const base = slugToTitle2.get(n.slug);
-          const target = (_i = linkIndex.get(stateKey(ns, n.slug))) != null ? _i : { path: "", basename: base };
-          const unique = ((_j = linkCounts.get(target.basename)) != null ? _j : 0) <= 1;
-          lines.push(`${indent}- ${buildInternalLink(target, n.title, unique)}`);
-        } else if (n.title) {
-          lines.push(`${indent}- **${n.title}**`);
-        }
+  return { written, unchanged, backedUp, moved, aborted: null };
+}
+async function writeTocIndex(plugin, task, ns, toc, targets, linkIndex, linkCounts, log) {
+  var _a, _b;
+  try {
+    const slugToTitle = /* @__PURE__ */ new Map();
+    for (const t of targets) slugToTitle.set(t.slug, sanitizeFileName(t.title));
+    const byUuid = /* @__PURE__ */ new Map();
+    for (const n of toc) byUuid.set(n.uuid, n);
+    const lines = [`# ${task.repoName} \xB7 \u77E5\u8BC6\u5E93\u76EE\u5F55`, ""];
+    for (const n of toc) {
+      let depth = 0;
+      let cur = n;
+      const guard = /* @__PURE__ */ new Set();
+      while ((cur == null ? void 0 : cur.parent_uuid) && !guard.has(cur.parent_uuid)) {
+        guard.add(cur.parent_uuid);
+        cur = byUuid.get(cur.parent_uuid);
+        depth++;
       }
-      const indexContent = propertiesBlock({
-        [FM.title]: `${task.repoName} \u77E5\u8BC6\u5E93\u76EE\u5F55`,
-        [FM.source]: `https://www.yuque.com/${ns}`
-      }) + `${lines.join("\n")}
-`;
-      const indexPath = joinPath(task.targetFolder, `${sanitizeFileName(task.repoName)} \u76EE\u5F55.md`);
-      if (indexPath.includes("/")) {
-        await ensureFolder(plugin.app, indexPath.slice(0, indexPath.lastIndexOf("/")));
+      const indent = "  ".repeat(depth);
+      if (n.type === "DOC" && n.slug && slugToTitle.has(n.slug)) {
+        const base = slugToTitle.get(n.slug);
+        const target = (_a = linkIndex.get(stateKey(ns, n.slug))) != null ? _a : { path: "", basename: base };
+        const unique = ((_b = linkCounts.get(target.basename)) != null ? _b : 0) <= 1;
+        lines.push(`${indent}- ${buildInternalLink(target, n.title, unique)}`);
+      } else if (n.title) {
+        lines.push(`${indent}- **${n.title}**`);
       }
-      const existingIndex = plugin.app.vault.getAbstractFileByPath(indexPath);
-      let indexChanged = true;
-      if (existingIndex instanceof import_obsidian5.TFile) {
-        const previous = await plugin.app.vault.read(existingIndex);
-        indexChanged = previous !== indexContent;
-        if (indexChanged) await plugin.app.vault.modify(existingIndex, indexContent);
-      } else {
-        await plugin.app.vault.create(indexPath, indexContent);
-      }
-      if (indexChanged) log(`\u5DF2\u66F4\u65B0\u77E5\u8BC6\u5E93\u76EE\u5F55\u7D22\u5F15\uFF1A${indexPath}`, "success");
-    } catch (e) {
-      log(`\u76EE\u5F55\u7D22\u5F15\u751F\u6210\u5931\u8D25\uFF1A${e.message}`, "error");
     }
+    const indexContent = propertiesBlock({
+      [FM.title]: `${task.repoName} \u77E5\u8BC6\u5E93\u76EE\u5F55`,
+      [FM.source]: `https://www.yuque.com/${ns}`
+    }) + `${lines.join("\n")}
+`;
+    const indexPath = joinPath(task.targetFolder, `${sanitizeFileName(task.repoName)} \u76EE\u5F55.md`);
+    if (indexPath.includes("/")) {
+      await ensureFolder(plugin.app, indexPath.slice(0, indexPath.lastIndexOf("/")));
+    }
+    const existingIndex = plugin.app.vault.getAbstractFileByPath(indexPath);
+    let indexChanged = true;
+    if (existingIndex instanceof import_obsidian6.TFile) {
+      const previous = await plugin.app.vault.read(existingIndex);
+      indexChanged = previous !== indexContent;
+      if (indexChanged) await plugin.app.vault.modify(existingIndex, indexContent);
+    } else {
+      await plugin.app.vault.create(indexPath, indexContent);
+    }
+    if (indexChanged) log(`\u5DF2\u66F4\u65B0\u77E5\u8BC6\u5E93\u76EE\u5F55\u7D22\u5F15\uFF1A${indexPath}`, "success");
+  } catch (e) {
+    log(`\u76EE\u5F55\u7D22\u5F15\u751F\u6210\u5931\u8D25\uFF1A${e.message}`, "error");
   }
+}
+async function syncTask(plugin, api, task, log, signal) {
+  var _a, _b, _c;
+  const settings = plugin.settings;
+  const ns = task.namespace;
+  const retryLog = (waitSec, attempt) => log(`\u8BED\u96C0 API \u9650\u6D41\uFF0C${waitSec} \u79D2\u540E\u81EA\u52A8\u91CD\u8BD5\uFF08\u7B2C ${attempt} \u6B21\uFF09\u2026`);
+  const { toc, docList } = await fetchTocAndDocs(api, task, retryLog, log);
+  const tocFolders = buildTocFolders(toc);
+  log(`\u76EE\u5F55\uFF08TOC\uFF09\u8282\u70B9\u6570\uFF1A${toc.length}`);
+  const docBySlug = /* @__PURE__ */ new Map();
+  for (const d of docList) docBySlug.set(d.slug, d);
+  if (docList.length === 0 && toc.length > 0) {
+    applyTocFallback(toc, docList, docBySlug, log);
+  }
+  if (docList.length === 0) {
+    log(
+      `\u26A0 \u76EE\u5F55\u4E0E\u6587\u6863\u5217\u8868\u5747\u4E3A\u7A7A\uFF1A\u300C${task.repoName}\u300D\u53EF\u80FD\u662F\u7A7A\u77E5\u8BC6\u5E93\uFF0C\u6216 Token \u65E0\u6743\u8BFB\u53D6\u5B83\u3002\u8BF7\u786E\u8BA4\u8BE5\u77E5\u8BC6\u5E93\u5728\u8BED\u96C0\u7F51\u9875\u4E2D\u786E\u5B9E\u6709\u6587\u6863\uFF0C\u4E14 Token \u52FE\u9009\u4E86\u8BFB\u53D6\u6743\u9650`,
+      "error"
+    );
+  }
+  const targets = resolveTargets(task, toc, docList, docBySlug, log);
+  const state = settings.yuqueSyncState || {};
+  const persistState = async () => {
+    settings.yuqueSyncState = state;
+    await plugin.saveSettings();
+  };
+  const colorMode = settings.yuqueTextColor || "drop";
+  const { pending, skipped, relocated } = await planPending(
+    plugin,
+    task,
+    ns,
+    state,
+    tocFolders,
+    targets,
+    log
+  );
+  log(`\u5171 ${targets.length} \u7BC7\uFF0C\u9700\u66F4\u65B0 ${pending.length} \u7BC7\uFF0C\u8DF3\u8FC7\u672A\u53D8\u5316 ${skipped} \u7BC7`);
+  const budget = decideBudget({
+    setting: (_a = settings.yuqueRequestBudget) != null ? _a : 0,
+    usedThisRun: (_b = api.requestCount) != null ? _b : 0,
+    headerRemaining: (_c = api.remainingFromHeader) != null ? _c : null
+  });
+  let budgetStopped = false;
+  if (pending.length > 0 && budget.allowance !== null && pending.length > budget.allowance) {
+    budgetStopped = true;
+    log(
+      `\u23F8 \u672C\u4EFB\u52A1\u6682\u4E0D\u5F00\u59CB\u62C9\u53D6\uFF1A\u8FD8\u9700 ${pending.length} \u6B21\u8BF7\u6C42\uFF0C\u672C\u6B21\u53EF\u7528 ${budget.allowance} \u6B21\uFF08${budgetSourceLabel(budget.source)}\uFF09\u3002\u5DF2\u540C\u6B65\u7684\u5185\u5BB9\u4FDD\u6301\u5B8C\u6574\uFF0C\u4E0B\u6B21\u6267\u884C\u5373\u53EF\u7EED\u8DD1\u3002`,
+      "info"
+    );
+  }
+  const fetched = await fetchAndStage(
+    api,
+    ns,
+    pending,
+    colorMode,
+    budgetStopped,
+    log,
+    signal,
+    persistState
+  );
+  if (fetched.aborted) return fetched.aborted;
+  const { staged, quotaExhausted, quotaRemaining } = fetched;
+  if (staged.length === 0 && !budgetStopped) {
+    log("\u6CA1\u6709\u9700\u8981\u5199\u5165\u7684\u6587\u6863", "info");
+  }
+  const { linkIndex, linkCounts, linksConverted } = convertInternalLinks(
+    plugin,
+    ns,
+    pending,
+    staged,
+    log
+  );
+  if (linksConverted > 0) {
+    log(`\u5DF2\u628A ${linksConverted} \u6761\u8BED\u96C0\u6587\u6863\u94FE\u63A5\u8F6C\u4E3A\u672C\u5730\u53CC\u94FE`);
+  }
+  if (settings.yuqueDownloadImages) {
+    await localizeImages(plugin, api, task, staged, log);
+  }
+  const writeResult = await writeStaged(
+    plugin,
+    task,
+    ns,
+    state,
+    staged,
+    quotaRemaining,
+    log,
+    signal,
+    persistState
+  );
+  if (writeResult.aborted) return writeResult.aborted;
+  const { written, unchanged, backedUp, moved } = writeResult;
+  await persistState();
+  const summary = `\u5199\u5165/\u66F4\u65B0 ${written} \u7BC7` + (unchanged > 0 ? `\uFF0C\u5185\u5BB9\u672A\u53D8 ${unchanged} \u7BC7` : "") + (relocated > 0 ? `\uFF0C\u5206\u7EC4\u8DDF\u968F\u8BED\u96C0 ${relocated} \u7BC7` : "") + (moved > 0 ? `\uFF0C\u4F4D\u7F6E\u8DDF\u968F ${moved} \u7BC7` : "") + (backedUp > 0 ? `\uFF0C\u51B2\u7A81\u5907\u4EFD ${backedUp} \u7BC7` : "");
+  if (quotaExhausted) {
+    log(`\u300C${task.repoName}\u300D\u56E0\u914D\u989D\u7528\u5C3D\u4E2D\u6B62\uFF1A${summary}`, "error");
+    log(
+      `\u5269\u4F59 ${quotaRemaining} \u7BC7\u672A\u62C9\u53D6\u3002\u914D\u989D\u6062\u590D\u540E\uFF0C\u518D\u6B21\u6267\u884C\u300C\u8BED\u96C0\u540C\u6B65\uFF1A\u7ACB\u5373\u540C\u6B65\u5168\u90E8\u4EFB\u52A1\u300D\u5373\u4ECE\u65AD\u70B9\u7EED\u8DD1\u2014\u2014\u5DF2\u6210\u529F\u5199\u5165\u7684\u6587\u6863\u4F1A\u88AB\u81EA\u52A8\u8DF3\u8FC7\uFF0C\u4E0D\u9700\u8981\u624B\u52A8\u6E05\u7406\u8BB0\u5F55\u3002`,
+      "info"
+    );
+  } else if (budgetStopped) {
+    log(`\u300C${task.repoName}\u300D\u6309\u8BF7\u6C42\u9884\u7B97\u6536\u5DE5\uFF1A${summary}`, "info");
+    log(
+      `\u672C\u4EFB\u52A1\u8FD8\u6709 ${pending.length} \u7BC7\u672A\u62C9\u53D6\u3002\u6267\u884C\u300C\u8BED\u96C0\u540C\u6B65\uFF1A\u7ACB\u5373\u540C\u6B65\u5168\u90E8\u4EFB\u52A1\u300D\u5373\u53EF\u4ECE\u65AD\u70B9\u7EED\u8DD1\u2014\u2014\u5DF2\u6210\u529F\u5199\u5165\u7684\u6587\u6863\u4F1A\u88AB\u81EA\u52A8\u8DF3\u8FC7\uFF0C\u4E0D\u9700\u8981\u624B\u52A8\u6E05\u7406\u8BB0\u5F55\u3002`,
+      "info"
+    );
+  } else {
+    log(`\u300C${task.repoName}\u300D\u5B8C\u6210\uFF1A${summary}`, "success");
+  }
+  if (toc.length > 0 && task.mode === "all") {
+    await writeTocIndex(plugin, task, ns, toc, targets, linkIndex, linkCounts, log);
+  }
+  return {
+    stop: quotaExhausted ? "quota" : budgetStopped ? "budget" : "done",
+    remainingDocs: quotaExhausted ? quotaRemaining : budgetStopped ? pending.length : 0
+  };
 }
 async function syncAllTasks(plugin, log, tasks, signal) {
   const settings = plugin.settings;
@@ -2533,7 +2851,7 @@ async function syncAllTasks(plugin, log, tasks, signal) {
     log("\u8FD8\u6CA1\u6709\u540C\u6B65\u4EFB\u52A1\uFF0C\u8BF7\u5148\u5728\u8BBE\u7F6E\u6216\u7528\u300C\u6DFB\u52A0\u8BED\u96C0\u540C\u6B65\u4EFB\u52A1\u300D\u547D\u4EE4\u521B\u5EFA", "error");
     return;
   }
-  const api = new YuqueApi(settings.yuqueToken);
+  const api = plugin.createApi();
   for (let i = 0; i < list.length; i++) {
     const task = list[i];
     if (signal == null ? void 0 : signal.aborted) {
@@ -2542,7 +2860,22 @@ async function syncAllTasks(plugin, log, tasks, signal) {
     }
     if (list.length > 1) log(`\u2014\u2014 [${i + 1}/${list.length}] \u300C${task.repoName}\u300D\u2014\u2014`);
     try {
-      await syncTask(plugin, api, task, log, signal);
+      const outcome = await syncTask(plugin, api, task, log, signal);
+      if ((outcome == null ? void 0 : outcome.stop) === "quota") {
+        log(
+          "\u8BED\u96C0 API \u914D\u989D\u5DF2\u7528\u5C3D\uFF0C\u4F59\u4E0B\u4EFB\u52A1\u672C\u6B21\u4E0D\u518D\u6267\u884C\u3002\u914D\u989D\u6062\u590D\u540E\uFF0C\u518D\u6267\u884C\u4E00\u6B21\u300C\u8BED\u96C0\u540C\u6B65\uFF1A\u7ACB\u5373\u540C\u6B65\u5168\u90E8\u4EFB\u52A1\u300D\u5373\u53EF\u4ECE\u65AD\u70B9\u7EED\u8DD1\uFF08\u5DF2\u5B8C\u6210\u7684\u4F1A\u81EA\u52A8\u8DF3\u8FC7\uFF09\u3002",
+          "error"
+        );
+        return;
+      }
+      if ((outcome == null ? void 0 : outcome.stop) === "budget") {
+        log(
+          "\u672C\u6B21\u540C\u6B65\u7684\u8BF7\u6C42\u9884\u7B97\u5DF2\u7528\u5B8C\uFF0C\u4F59\u4E0B\u4EFB\u52A1\u7559\u5230\u4E0B\u6B21\u3002\u300C\u8BED\u96C0\u540C\u6B65\uFF1A\u7ACB\u5373\u540C\u6B65\u5168\u90E8\u4EFB\u52A1\u300D\u4F1A\u63A5\u7740\u8DD1\u3002",
+          "info"
+        );
+        return;
+      }
+      if ((outcome == null ? void 0 : outcome.stop) === "aborted") return;
     } catch (e) {
       log(`\u4EFB\u52A1\u300C${task.repoName}\u300D\u5931\u8D25\uFF1A${e.message}`, "error");
     }
@@ -2562,9 +2895,9 @@ function resolveTargetFolders(repos, root) {
   });
 }
 
-// src/yuque/ui.ts
-var import_obsidian6 = require("obsidian");
-var SyncModal = class extends import_obsidian6.Modal {
+// src/yuque/sync-modal.ts
+var import_obsidian7 = require("obsidian");
+var SyncModal = class extends import_obsidian7.Modal {
   constructor(app, title) {
     super(app);
     this.title = title;
@@ -2591,7 +2924,7 @@ async function runWithSyncModal(plugin, title, fn, opts) {
   modal.open();
   const stop = { btn: null };
   if (opts == null ? void 0 : opts.stoppable) {
-    new import_obsidian6.Setting(modal.contentEl).addButton((b) => {
+    new import_obsidian7.Setting(modal.contentEl).addButton((b) => {
       stop.btn = b.buttonEl;
       b.setButtonText("\u505C\u6B62").setWarning().onClick(() => {
         controller.abort();
@@ -2614,7 +2947,10 @@ async function runWithSyncModal(plugin, title, fn, opts) {
     log("\u2014\u2014 \u7ED3\u675F \u2014\u2014");
   }
 }
-var AddTaskModal = class extends import_obsidian6.Modal {
+
+// src/yuque/task-modal.ts
+var import_obsidian8 = require("obsidian");
+var AddTaskModal = class extends import_obsidian8.Modal {
   constructor(plugin, onConfirm) {
     super(plugin.app);
     this.plugin = plugin;
@@ -2639,7 +2975,7 @@ var AddTaskModal = class extends import_obsidian6.Modal {
     this.contentEl.empty();
     this.bodyEl = this.contentEl.createDiv();
     const loading = this.bodyEl.createEl("p", { text: "\u6B63\u5728\u83B7\u53D6\u77E5\u8BC6\u5E93\u5217\u8868\u2026" });
-    new import_obsidian6.Setting(this.contentEl).addButton((b) => {
+    new import_obsidian8.Setting(this.contentEl).addButton((b) => {
       this.confirmBtn = b.buttonEl;
       b.setButtonText("\u521B\u5EFA\u5E76\u540C\u6B65").setCta().onClick(async () => {
         const tasks = await this.buildTasks();
@@ -2654,7 +2990,7 @@ var AddTaskModal = class extends import_obsidian6.Modal {
   }
   async loadRepos(loadingEl) {
     try {
-      const api = new YuqueApi(this.plugin.settings.yuqueToken);
+      const api = this.plugin.createApi();
       this.repos = await api.getRepos();
     } catch (e) {
       console.error("[yuque-style] \u83B7\u53D6\u77E5\u8BC6\u5E93\u5931\u8D25", e);
@@ -2672,7 +3008,7 @@ var AddTaskModal = class extends import_obsidian6.Modal {
     const s = this.plugin.settings;
     this.bodyEl.empty();
     const multi = this.picked.length > 1;
-    new import_obsidian6.Setting(this.bodyEl).setName("\u6839\u6587\u4EF6\u5939\uFF08\u53EF\u9009\uFF09").setDesc("\u6BCF\u4E2A\u77E5\u8BC6\u5E93\u653E\u5728\u300C\u6839\u6587\u4EF6\u5939 / \u5E93\u540D\u300D\u4E0B\uFF1B\u7559\u7A7A\u5219\u76F4\u63A5\u7528\u5E93\u540D").addText((t) => {
+    new import_obsidian8.Setting(this.bodyEl).setName("\u6839\u6587\u4EF6\u5939\uFF08\u53EF\u9009\uFF09").setDesc("\u6BCF\u4E2A\u77E5\u8BC6\u5E93\u653E\u5728\u300C\u6839\u6587\u4EF6\u5939 / \u5E93\u540D\u300D\u4E0B\uFF1B\u7559\u7A7A\u5219\u76F4\u63A5\u7528\u5E93\u540D").addText((t) => {
       t.setPlaceholder("\u7559\u7A7A = \u5E93\u540D\u5E73\u94FA");
       t.setValue(this.rootFolder);
       t.inputEl.addClass("yuque-folder-input");
@@ -2686,7 +3022,7 @@ var AddTaskModal = class extends import_obsidian6.Modal {
       text: "\u9009\u62E9\u77E5\u8BC6\u5E93\uFF08\u52FE\u9009\u591A\u4E2A\u5373\u4E00\u6B21\u521B\u5EFA\u591A\u4E2A\u4EFB\u52A1\uFF09",
       cls: "setting-item-description"
     });
-    const search = new import_obsidian6.TextComponent(repoSection);
+    const search = new import_obsidian8.TextComponent(repoSection);
     search.setPlaceholder("\u641C\u7D22\u77E5\u8BC6\u5E93\u540D\u79F0\u2026");
     search.setValue(this.keyword);
     search.onChange((v) => {
@@ -2694,7 +3030,7 @@ var AddTaskModal = class extends import_obsidian6.Modal {
       this.renderRepoList();
     });
     this.listEl = repoSection.createDiv({ cls: "yuque-doc-select-list" });
-    const bar = new import_obsidian6.Setting(repoSection);
+    const bar = new import_obsidian8.Setting(repoSection);
     bar.addButton(
       (b) => b.setButtonText("\u5168\u9009\u672A\u914D\u7F6E\u7684").onClick(() => {
         for (const r of this.visibleRepos()) {
@@ -2714,7 +3050,7 @@ var AddTaskModal = class extends import_obsidian6.Modal {
     this.summaryEl = repoSection.createEl("p", { cls: "setting-item-description" });
     this.pathEl = repoSection.createEl("p", { cls: "setting-item-description" });
     this.renderRepoList();
-    new import_obsidian6.Setting(this.bodyEl).setName("\u540C\u6B65\u8303\u56F4").setDesc(
+    new import_obsidian8.Setting(this.bodyEl).setName("\u540C\u6B65\u8303\u56F4").setDesc(
       multi ? "\u5DF2\u9009\u591A\u4E2A\u77E5\u8BC6\u5E93\uFF0C\u56FA\u5B9A\u4E3A\u300C\u6574\u4E2A\u77E5\u8BC6\u5E93\u300D\uFF1B\u53EA\u52FE 1 \u4E2A\u65F6\u624D\u80FD\u6311\u9009\u6587\u6863" : "\u6574\u4E2A\u77E5\u8BC6\u5E93 \u6216 \u53EA\u540C\u6B65\u52FE\u9009\u7684\u6587\u6863"
     ).addDropdown((d) => {
       d.addOption("all", "\u6574\u4E2A\u77E5\u8BC6\u5E93");
@@ -2727,11 +3063,11 @@ var AddTaskModal = class extends import_obsidian6.Modal {
           const repo = this.repos.find((r) => r.namespace === this.picked[0]);
           if (!repo) return;
           try {
-            new import_obsidian6.Notice("\u6B63\u5728\u83B7\u53D6\u6587\u6863\u5217\u8868\u2026");
-            const api = new YuqueApi(s.yuqueToken);
+            new import_obsidian8.Notice("\u6B63\u5728\u83B7\u53D6\u6587\u6863\u5217\u8868\u2026");
+            const api = this.plugin.createApi();
             this.docList = await api.getDocList(repo.namespace);
           } catch (e) {
-            new import_obsidian6.Notice(`\u83B7\u53D6\u6587\u6863\u5217\u8868\u5931\u8D25\uFF1A${e.message}`);
+            new import_obsidian8.Notice(`\u83B7\u53D6\u6587\u6863\u5217\u8868\u5931\u8D25\uFF1A${e.message}`);
             this.mode = "all";
             this.renderForm();
             return;
@@ -2764,7 +3100,7 @@ var AddTaskModal = class extends import_obsidian6.Modal {
           });
           row.createSpan({ text: doc.title });
         }
-        new import_obsidian6.Setting(section).addButton(
+        new import_obsidian8.Setting(section).addButton(
           (b) => b.setButtonText("\u5168\u9009").onClick(() => {
             listEl.querySelectorAll("input[type=checkbox]").forEach((el) => el.checked = true);
             this.docList.forEach((d) => this.checkedDocs.add(d.slug));
@@ -2782,7 +3118,7 @@ var AddTaskModal = class extends import_obsidian6.Modal {
   async buildTasks() {
     const pickedRepos = this.pickedRepos();
     if (pickedRepos.length === 0) {
-      new import_obsidian6.Notice("\u672A\u9009\u62E9\u4EFB\u4F55\u77E5\u8BC6\u5E93");
+      new import_obsidian8.Notice("\u672A\u9009\u62E9\u4EFB\u4F55\u77E5\u8BC6\u5E93");
       return null;
     }
     const existing = new Map(
@@ -2793,7 +3129,7 @@ var AddTaskModal = class extends import_obsidian6.Modal {
       const repo = pickedRepos[0];
       const selectedDocs = this.docList.filter((d) => this.checkedDocs.has(d.slug));
       if (selectedDocs.length === 0) {
-        new import_obsidian6.Notice("\u672A\u52FE\u9009\u4EFB\u4F55\u6587\u6863");
+        new import_obsidian8.Notice("\u672A\u52FE\u9009\u4EFB\u4F55\u6587\u6863");
         return null;
       }
       return [
@@ -2838,7 +3174,7 @@ var AddTaskModal = class extends import_obsidian6.Modal {
       this.mode = "all";
       this.docList = [];
       this.checkedDocs.clear();
-      new import_obsidian6.Notice("\u5DF2\u9009\u591A\u4E2A\u77E5\u8BC6\u5E93\uFF0C\u540C\u6B65\u8303\u56F4\u56FA\u5B9A\u4E3A\u300C\u6574\u4E2A\u77E5\u8BC6\u5E93\u300D");
+      new import_obsidian8.Notice("\u5DF2\u9009\u591A\u4E2A\u77E5\u8BC6\u5E93\uFF0C\u540C\u6B65\u8303\u56F4\u56FA\u5B9A\u4E3A\u300C\u6574\u4E2A\u77E5\u8BC6\u5E93\u300D");
     }
     this.renderForm();
   }
@@ -2904,7 +3240,7 @@ var AddTaskModal = class extends import_obsidian6.Modal {
 };
 async function addSyncTaskFlow(plugin) {
   if (!plugin.settings.yuqueToken) {
-    new import_obsidian6.Notice("\u8BF7\u5148\u5728\u63D2\u4EF6\u8BBE\u7F6E\u4E2D\u586B\u5199\u8BED\u96C0 Token");
+    new import_obsidian8.Notice("\u8BF7\u5148\u5728\u63D2\u4EF6\u8BBE\u7F6E\u4E2D\u586B\u5199\u8BED\u96C0 Token");
     return;
   }
   const tasks = await new Promise((resolve) => {
@@ -2946,7 +3282,7 @@ async function addSyncTaskFlow(plugin) {
     const ok = await confirmRelocate(plugin, moves);
     if (ok) {
       const { moved, skipped } = await relocateFolders(plugin, moves);
-      new import_obsidian6.Notice(`\u5DF2\u642C\u8FD0 ${moved} \u7BC7${skipped > 0 ? `\uFF0C\u76EE\u6807\u5DF2\u5B58\u5728\u800C\u8DF3\u8FC7 ${skipped} \u7BC7` : ""}`);
+      new import_obsidian8.Notice(`\u5DF2\u642C\u8FD0 ${moved} \u7BC7${skipped > 0 ? `\uFF0C\u76EE\u6807\u5DF2\u5B58\u5728\u800C\u8DF3\u8FC7 ${skipped} \u7BC7` : ""}`);
     }
   }
   await new Promise((r) => setTimeout(r, 200));
@@ -2963,7 +3299,7 @@ async function addSyncTaskFlow(plugin) {
 function confirmRelocate(plugin, moves) {
   return new Promise((resolve) => {
     let settled = false;
-    const modal = new import_obsidian6.Modal(plugin.app);
+    const modal = new import_obsidian8.Modal(plugin.app);
     modal.titleEl.setText("\u76EE\u6807\u6587\u4EF6\u5939\u5DF2\u53D8\u66F4");
     modal.contentEl.createEl("p", {
       text: "\u8FD9\u4E9B\u77E5\u8BC6\u5E93\u6362\u4E86\u76EE\u6807\u6587\u4EF6\u5939\uFF0C\u5DF2\u540C\u6B65\u8FC7\u7684\u6587\u6863\u8FD8\u7559\u5728\u65E7\u4F4D\u7F6E\uFF08\u540C\u6B65\u53EA\u8BA4 state \u8BB0\u5F55\u7684\u8DEF\u5F84\uFF09\u3002\u8981\u73B0\u5728\u642C\u8FC7\u53BB\u5417\uFF1F"
@@ -2978,7 +3314,7 @@ function confirmRelocate(plugin, moves) {
       text: "\u76EE\u6807\u4F4D\u7F6E\u5DF2\u5B58\u5728\u540C\u540D\u6587\u4EF6\u65F6\u8DF3\u8FC7\uFF0C\u4E0D\u505A\u8986\u76D6\u3002",
       cls: "setting-item-description"
     });
-    new import_obsidian6.Setting(modal.contentEl).addButton(
+    new import_obsidian8.Setting(modal.contentEl).addButton(
       (b) => b.setButtonText("\u642C\u8FD0").setCta().onClick(() => {
         if (!settled) {
           settled = true;
@@ -3028,17 +3364,244 @@ async function relocateFolders(plugin, moves) {
   }
   return { moved, skipped };
 }
+
+// src/yuque/diagnose.ts
+var import_obsidian9 = require("obsidian");
+
+// src/yuque/quota.ts
+var YUQUE_QUOTA_DOCUMENTED = {
+  limitPerHour: 5e3,
+  limitPerSecond: 100,
+  /** 官方称响应头会返回 X-RateLimit-Limit / X-RateLimit-Remaining */
+  returnsRateHeaders: true,
+  /** 共享口径：个人或团队下的所有 Token 共用同一限额（故「多 Token 轮换」必然无效） */
+  sharedAcrossTokens: true,
+  source: "https://www.yuque.com/yuque/developer/openapi"
+};
+var YUQUE_QUOTA_PER_HOUR = null;
+var YUQUE_QUOTA_MEASURED_AT = "";
+function describeQuota() {
+  const doc = `\u8BED\u96C0\u5B98\u65B9\u8BB0\u8F7D ${YUQUE_QUOTA_DOCUMENTED.limitPerHour} \u6B21/\u5C0F\u65F6\u3001${YUQUE_QUOTA_DOCUMENTED.limitPerSecond} \u6B21/\u79D2\uFF08\u4E2A\u4EBA\u4E0E\u56E2\u961F\u4E0B\u6240\u6709 Token \u5171\u4EAB\uFF09\uFF1B\u4F46\u5B9E\u6D4B\u5B58\u5728\u7B2C\u4E8C\u4E2A\u3001\u5B98\u65B9\u672A\u8BB0\u8F7D\u7684\u300C\u7F51\u5173\u5C42\u300D\u9650\u6D41\u5668\uFF08\u7531\u963F\u91CC\u4E91\u8FB9\u7F18\u5410\u51FA\u3001\u4E0D\u5E26 X-RateLimit-*\u3001\u4E14\u4E0D\u5728\u6574\u70B9\u6062\u590D\uFF09\uFF0C\u5B83\u751F\u6548\u671F\u95F4\u5B98\u65B9\u90A3\u4E2A\u989D\u5EA6\u7528\u4E0D\u4E0A`;
+  if (YUQUE_QUOTA_PER_HOUR === null) {
+    return `${doc}\u3002\u672C\u673A\u5C1A\u672A\u5B9E\u6D4B\u51FA\u4E0A\u9650`;
+  }
+  return `${doc}\u3002\u672C\u673A\u5B9E\u6D4B\u7EA6 ${YUQUE_QUOTA_PER_HOUR} \u6B21/\u5C0F\u65F6\uFF08\u5B9E\u6D4B\u4E8E ${YUQUE_QUOTA_MEASURED_AT}\uFF09`;
+}
+
+// src/yuque/diagnose.ts
+function safeJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    return null;
+  }
+}
+function explainStatus(log, api, status, headers) {
+  if (status === 429) {
+    const via = pickHeader(headers, "via");
+    const retryAfter = pickHeader(headers, "retry-after");
+    const limit = pickHeader(headers, "x-ratelimit-limit");
+    const remaining = pickHeader(headers, "x-ratelimit-remaining");
+    const reset = pickHeader(headers, "x-ratelimit-reset");
+    const hasRateHeaders = !!(limit || remaining);
+    log("  429 \u5224\u5B9A\uFF1A\u8BED\u96C0 API \u914D\u989D\u5DF2\u7528\u5C3D\uFF08\u6309\u8D26\u53F7/\u56E2\u961F\u7EF4\u5EA6\u751F\u6548\uFF0C\u4E0D\u662F\u6743\u9650\u95EE\u9898\uFF09", "error");
+    log(
+      `  \u9650\u6D41\u5C42\uFF1A${via != null ? via : "(\u54CD\u5E94\u5934\u672A\u7ED9\u51FA via)"}` + ((via == null ? void 0 : via.includes("[429]")) ? "\u3000\u2190 \u5E26 [429] \u8868\u793A\u9650\u6D41\u53D1\u751F\u5728\u8BED\u96C0\u7F51\u5173\u5C42" : "")
+    );
+    log(
+      `  \u5F52\u56E0\uFF1A${hasRateHeaders ? "\u5E26 X-RateLimit-*\uFF0C\u6765\u81EA\u5E94\u7528\u5C42\u9650\u6D41\u5668\uFF08\u5373\u5B98\u65B9\u8BB0\u8F7D 5000 \u6B21/\u5C0F\u65F6\u90A3\u4E2A\uFF09" : (via == null ? void 0 : via.includes("[429]")) ? "\u65E0\u914D\u989D\u5934\u4E14\u7531\u7F51\u5173\u5410\u51FA \u2192 \u7F51\u5173\u5C42\u9650\u6D41\u5668\uFF08\u5DF2\u5B9E\u6D4B\u786E\u8BA4\uFF1B\u5B98\u65B9\u6587\u6863\u672A\u8BB0\u8F7D\uFF0C\u989D\u5EA6\u4E0E\u7A97\u53E3\u5747\u672A\u77E5\uFF09" : "\u65E0\u914D\u989D\u5934\uFF0C\u65E0\u6CD5\u636E\u6B64\u5224\u65AD\u662F\u54EA\u4E00\u5C42"}`
+    );
+    if (!hasRateHeaders) {
+      log(
+        "  \u4E3A\u4EC0\u4E48\u6CA1\u6709\u914D\u989D\u5934\uFF1A\u7F51\u5173\u5728\u5E94\u7528\u5C42\u4E4B\u524D\u5C31\u62E6\u4E0B\u4E86\u8BF7\u6C42\uFF0C\u5E94\u7528\u5C42\u6CA1\u673A\u4F1A\u52A0\u4E0A X-RateLimit-*\u3002\u300C\u8BFB\u4E0D\u5230\u914D\u989D\u5934\u300D\u4E0D\u7B49\u4E8E\u300C\u8BED\u96C0\u4E0D\u63D0\u4F9B\u300D",
+        "info"
+      );
+    }
+    log(
+      `  Retry-After\uFF1A${retryAfter != null ? retryAfter : "\u672A\u8FD4\u56DE"}\uFF1BX-RateLimit-Limit\uFF1A${limit != null ? limit : "\u672A\u8FD4\u56DE"}\uFF1BX-RateLimit-Remaining\uFF1A${remaining != null ? remaining : "\u672A\u8FD4\u56DE"}\uFF1BX-RateLimit-Reset\uFF1A${reset != null ? reset : "\u672A\u8FD4\u56DE"}`,
+      "info"
+    );
+    log(`  \u914D\u989D\u53E3\u5F84\uFF1A${describeQuota()}`, "info");
+  } else if (status === 401) {
+    log("  401 \u5224\u5B9A\uFF1AToken \u65E0\u6548\u6216\u5DF2\u88AB\u91CD\u7F6E\uFF0C\u8BF7\u5230\u8BED\u96C0\u300C\u8BBE\u7F6E \u2192 Token\u300D\u91CD\u65B0\u751F\u6210", "error");
+  } else if (status === 403) {
+    log("  403 \u5224\u5B9A\uFF1AToken \u6743\u9650\u8303\u56F4\u4E0D\u542B\u8BE5\u8D44\u6E90\uFF0C\u6216\u8BE5\u8D26\u53F7\u672C\u8EAB\u65E0\u6743\u8BBF\u95EE\u6B64\u77E5\u8BC6\u5E93", "error");
+  }
+  if (api.lastRateInfo) {
+    log(`  \u6700\u8FD1\u4E00\u6B21\u8BF7\u6C42\uFF1A${api.lastRateInfo.path} @ ${new Date(api.lastRateInfo.at).toLocaleString()}`);
+  }
+}
+function dumpHeaders(log, label, headers) {
+  const lines = headerDump(headers);
+  console.log(
+    `[yuque-style \u8BCA\u65AD] ${label} \u5B8C\u6574\u54CD\u5E94\u5934
+${lines.length > 0 ? lines.join("\n") : "(\u65E0\u54CD\u5E94\u5934)"}`
+  );
+  const picked = ["via", "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset"].map((k) => {
+    var _a;
+    return `${k}=${(_a = pickHeader(headers, k)) != null ? _a : "-"}`;
+  }).join("  ");
+  log(`  ${picked}`);
+}
+async function diagnoseFlow(plugin) {
+  if (!plugin.settings.yuqueToken) {
+    new import_obsidian9.Notice("\u8BF7\u5148\u5728\u63D2\u4EF6\u8BBE\u7F6E\u4E2D\u586B\u5199\u8BED\u96C0 Token");
+    return;
+  }
+  await runWithSyncModal(plugin, "\u8BED\u96C0\u540C\u6B65\u8BCA\u65AD", async (log) => {
+    var _a, _b, _c, _d;
+    const rateLines = describeRateLog(plugin.settings.yuqueRateLog);
+    log("\u2014\u2014 \u914D\u989D\u89C2\u6D4B\uFF08\u672C\u673A\u8BB0\u5F55\uFF0C\u4E0D\u6D88\u8017\u914D\u989D\uFF09\u2014\u2014");
+    for (const line of rateLines) log(`  ${line}`);
+    console.log(`[yuque-style \u8BCA\u65AD] \u914D\u989D\u89C2\u6D4B
+${rateLines.join("\n")}`);
+    log(
+      `  \u5B98\u65B9\u53E3\u5F84\uFF1A${YUQUE_QUOTA_DOCUMENTED.limitPerHour} \u6B21/\u5C0F\u65F6\u3001${YUQUE_QUOTA_DOCUMENTED.limitPerSecond} \u6B21/\u79D2\uFF08\u4E2A\u4EBA\u4E0E\u56E2\u961F\u4E0B\u6240\u6709 Token \u5171\u4EAB\uFF09`
+    );
+    log("\u2014\u2014 \u5B9E\u65F6\u63A2\u6D4B \u2014\u2014");
+    const api = plugin.createApi();
+    const userRes = await api.getRaw("/user");
+    const user = (_a = safeJson(userRes.text)) == null ? void 0 : _a.data;
+    const login = user == null ? void 0 : user.login;
+    log(`GET /user \u2192 ${userRes.status}\uFF0C\u7528\u6237\uFF1A${(_b = user == null ? void 0 : user.name) != null ? _b : "?"}\uFF08login: ${login != null ? login : "?"}\uFF09`);
+    dumpHeaders(log, "GET /user", userRes.headers);
+    const scopes = pickHeader(userRes.headers, "x-oauth-scopes");
+    log(
+      scopes ? `Token \u6743\u9650\u8303\u56F4\uFF1A${scopes}` : "Token \u6743\u9650\u8303\u56F4\uFF1A\u672A\u8FD4\u56DE\uFF08\u8BF7\u6C42\u53EF\u80FD\u5728\u9274\u6743\u524D\u5C31\u88AB\u7F51\u5173\u62E6\u4E0B\uFF09"
+    );
+    if (userRes.status !== 200) {
+      explainStatus(log, api, userRes.status, userRes.headers);
+      log(`  \u54CD\u5E94\uFF1A${userRes.text.slice(0, 200)}`, "error");
+      return;
+    }
+    const reposRes = await api.getRaw(
+      `/users/${encodeURIComponent(String(login))}/repos?offset=0&limit=100`
+    );
+    const reposData = (_c = safeJson(reposRes.text)) == null ? void 0 : _c.data;
+    const repos = Array.isArray(reposData) ? reposData : [];
+    log(`GET /users/${login}/repos \u2192 ${reposRes.status}\uFF0C${repos.length} \u4E2A\u77E5\u8BC6\u5E93`);
+    dumpHeaders(log, "GET /users/:login/repos", reposRes.headers);
+    if (reposRes.status === 429) {
+      explainStatus(log, api, 429, reposRes.headers);
+      return;
+    }
+    for (const r of repos.slice(0, 30)) {
+      log(`  \xB7 ${r.name}\uFF08namespace: ${r.namespace}\uFF0Cid: ${r.id}\uFF09`);
+    }
+    const tasks = plugin.settings.yuqueTasks || [];
+    if (tasks.length === 0) {
+      log("\u6CA1\u6709\u540C\u6B65\u4EFB\u52A1\uFF0C\u4EC5\u5217\u51FA\u77E5\u8BC6\u5E93\u4FE1\u606F\u3002\u53EF\u5728\u4E0A\u65B9 namespace \u4E2D\u9009\u4E00\u4E2A\u624B\u52A8\u8BCA\u65AD", "info");
+    }
+    for (const task of tasks) {
+      const probes = [
+        ["\u76EE\u5F55 by namespace", `/repos/${nsPath(task.namespace)}/toc`],
+        ["\u76EE\u5F55 by id", `/repos/${task.repoId}/toc`],
+        ["\u6587\u6863\u5217\u8868 by namespace", `/repos/${nsPath(task.namespace)}/docs?offset=0&limit=100`],
+        ["\u6587\u6863\u5217\u8868 by id", `/repos/${task.repoId}/docs?offset=0&limit=100`]
+      ];
+      for (const [label, path] of probes) {
+        const r = await api.getRaw(path);
+        const data = (_d = safeJson(r.text)) == null ? void 0 : _d.data;
+        const count = Array.isArray(data) ? `${data.length} \u9879` : `\u975E\u6570\u7EC4\uFF08${data === null ? "null" : typeof data}\uFF09`;
+        log(`\u300C${task.repoName}\u300D${label} \u2192 ${r.status}\uFF0C${count}`);
+        dumpHeaders(log, `${label} ${path}`, r.headers);
+        console.log(`[yuque-style \u8BCA\u65AD] ${label} ${path}
+  status=${r.status}
+  ${r.text.slice(0, 3e3)}`);
+        if (r.status === 429) {
+          explainStatus(log, api, 429, r.headers);
+          return;
+        }
+        if (r.status !== 200) log(`  \u54CD\u5E94\uFF1A${r.text.slice(0, 200)}`, "error");
+      }
+    }
+    log("\u2014\u2014 \u5B8C\u6574\u54CD\u5E94\u5934\u4E0E\u54CD\u5E94\u4F53\u5DF2\u6253\u5370\u5230\u63A7\u5236\u53F0\uFF08Ctrl+Shift+I \u2192 Console\uFF09\u2014\u2014");
+  });
+}
+
+// src/yuque/ui.ts
+var ManageTasksModal = class extends import_obsidian10.Modal {
+  constructor(plugin) {
+    super(plugin.app);
+    this.plugin = plugin;
+  }
+  onOpen() {
+    this.titleEl.setText("\u8BED\u96C0\u540C\u6B65\u4EFB\u52A1");
+    this.modalEl.addClass("yuque-sync-modal");
+    this.render();
+  }
+  render() {
+    const { contentEl } = this;
+    contentEl.empty();
+    const tasks = this.plugin.settings.yuqueTasks || [];
+    const total = tasks.reduce(
+      (sum, t) => sum + (t.mode === "all" ? 0 : t.selectedDocs.length),
+      0
+    );
+    contentEl.createEl("p", {
+      cls: "setting-item-description",
+      text: total > 0 ? `\u5171 ${tasks.length} \u4E2A\u4EFB\u52A1\uFF08\u5176\u4E2D\u6309\u7BC7\u52FE\u9009\u5171 ${total} \u7BC7\uFF09\uFF1B\u540C\u6B65\u6309\u8BED\u96C0\u66F4\u65B0\u65F6\u95F4\u589E\u91CF\u62C9\u53D6` : `\u5171 ${tasks.length} \u4E2A\u4EFB\u52A1\uFF1B\u540C\u6B65\u6309\u8BED\u96C0\u66F4\u65B0\u65F6\u95F4\u589E\u91CF\u62C9\u53D6`
+    });
+    if (tasks.length === 0) {
+      contentEl.createEl("p", { text: "\u8FD8\u6CA1\u6709\u540C\u6B65\u4EFB\u52A1\uFF0C\u5148\u6DFB\u52A0\u4E00\u4E2A\u3002" });
+    } else {
+      const list = contentEl.createDiv({ cls: "yuque-task-list" });
+      for (const task of tasks) {
+        const row = list.createDiv({ cls: "yuque-task-row" });
+        const info = row.createDiv({ cls: "yuque-task-info" });
+        info.createDiv({ cls: "yuque-task-name", text: task.repoName });
+        info.createDiv({
+          cls: "yuque-task-desc",
+          text: `${task.namespace} \xB7 ${task.mode === "all" ? "\u6574\u4E2A\u77E5\u8BC6\u5E93" : `\u6307\u5B9A\u6587\u6863 ${task.selectedDocs.length} \u7BC7`} \xB7 \u76EE\u6807\uFF1A${task.targetFolder || "\u4ED3\u5E93\u6839\u76EE\u5F55"}`
+        });
+        const actions = row.createDiv({ cls: "yuque-task-actions" });
+        const sync = actions.createEl("button", { text: "\u7ACB\u5373\u540C\u6B65" });
+        sync.addEventListener("click", () => {
+          this.close();
+          void runWithSyncModal(this.plugin, `\u540C\u6B65\u300C${task.repoName}\u300D`, async (log) => {
+            await syncTask(this.plugin, this.plugin.createApi(), task, log);
+          });
+        });
+        const del = actions.createEl("button", { text: "\u5220\u9664", cls: "mod-warning" });
+        del.addEventListener("click", async () => {
+          this.plugin.settings.yuqueTasks = (this.plugin.settings.yuqueTasks || []).filter(
+            (t) => t !== task
+          );
+          await this.plugin.saveSettings();
+          this.render();
+        });
+      }
+    }
+    new import_obsidian10.Setting(contentEl).addButton(
+      (b) => b.setButtonText("\u6DFB\u52A0 / \u66F4\u65B0\u4EFB\u52A1").onClick(() => {
+        this.close();
+        void addSyncTaskFlow(this.plugin);
+      })
+    ).addButton(
+      (b) => b.setButtonText("\u7ACB\u5373\u540C\u6B65\u5168\u90E8").onClick(() => {
+        this.close();
+        void syncAllFlow(this.plugin);
+      })
+    );
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+function manageTasksFlow(plugin) {
+  new ManageTasksModal(plugin).open();
+}
 async function syncAllFlow(plugin) {
   const tasks = plugin.settings.yuqueTasks || [];
   if (tasks.length === 0) {
     const go = await new Promise((resolve) => {
       let settled = false;
-      const modal = new import_obsidian6.Modal(plugin.app);
+      const modal = new import_obsidian10.Modal(plugin.app);
       modal.titleEl.setText("\u8BED\u96C0\u540C\u6B65");
       modal.contentEl.createEl("p", {
         text: "\u8FD8\u6CA1\u6709\u540C\u6B65\u4EFB\u52A1\u3002\u662F\u5426\u73B0\u5728\u521B\u5EFA\u4E00\u4E2A\uFF1F\uFF08\u9009\u62E9\u77E5\u8BC6\u5E93\u3001\u8303\u56F4\u4E0E\u76EE\u6807\u6587\u4EF6\u5939\uFF09"
       });
-      new import_obsidian6.Setting(modal.contentEl).addButton(
+      new import_obsidian10.Setting(modal.contentEl).addButton(
         (b) => b.setButtonText("\u521B\u5EFA\u540C\u6B65\u4EFB\u52A1").setCta().onClick(() => {
           if (!settled) {
             settled = true;
@@ -3068,63 +3631,6 @@ async function syncAllFlow(plugin) {
     },
     { stoppable: true }
   );
-}
-function safeJson(text) {
-  try {
-    return JSON.parse(text);
-  } catch (e) {
-    return null;
-  }
-}
-async function diagnoseFlow(plugin) {
-  if (!plugin.settings.yuqueToken) {
-    new import_obsidian6.Notice("\u8BF7\u5148\u5728\u63D2\u4EF6\u8BBE\u7F6E\u4E2D\u586B\u5199\u8BED\u96C0 Token");
-    return;
-  }
-  await runWithSyncModal(plugin, "\u8BED\u96C0\u540C\u6B65\u8BCA\u65AD", async (log) => {
-    var _a, _b, _c, _d;
-    const api = new YuqueApi(plugin.settings.yuqueToken);
-    const userRes = await api.getRaw("/user");
-    const user = (_a = safeJson(userRes.text)) == null ? void 0 : _a.data;
-    const login = user == null ? void 0 : user.login;
-    log(`GET /user \u2192 ${userRes.status}\uFF0C\u7528\u6237\uFF1A${(_b = user == null ? void 0 : user.name) != null ? _b : "?"}\uFF08login: ${login != null ? login : "?"}\uFF09`);
-    if (userRes.status !== 200) {
-      log(`  \u54CD\u5E94\uFF1A${userRes.text.slice(0, 200)}`, "error");
-      return;
-    }
-    const reposRes = await api.getRaw(
-      `/users/${encodeURIComponent(String(login))}/repos?offset=0&limit=100`
-    );
-    const reposData = (_c = safeJson(reposRes.text)) == null ? void 0 : _c.data;
-    const repos = Array.isArray(reposData) ? reposData : [];
-    log(`GET /users/${login}/repos \u2192 ${reposRes.status}\uFF0C${repos.length} \u4E2A\u77E5\u8BC6\u5E93`);
-    for (const r of repos.slice(0, 30)) {
-      log(`  \xB7 ${r.name}\uFF08namespace: ${r.namespace}\uFF0Cid: ${r.id}\uFF09`);
-    }
-    const tasks = plugin.settings.yuqueTasks || [];
-    if (tasks.length === 0) {
-      log("\u6CA1\u6709\u540C\u6B65\u4EFB\u52A1\uFF0C\u4EC5\u5217\u51FA\u77E5\u8BC6\u5E93\u4FE1\u606F\u3002\u53EF\u5728\u4E0A\u65B9 namespace \u4E2D\u9009\u4E00\u4E2A\u624B\u52A8\u8BCA\u65AD", "info");
-    }
-    for (const task of tasks) {
-      const probes = [
-        ["\u76EE\u5F55 by namespace", `/repos/${nsPath(task.namespace)}/toc`],
-        ["\u76EE\u5F55 by id", `/repos/${task.repoId}/toc`],
-        ["\u6587\u6863\u5217\u8868 by namespace", `/repos/${nsPath(task.namespace)}/docs?offset=0&limit=100`],
-        ["\u6587\u6863\u5217\u8868 by id", `/repos/${task.repoId}/docs?offset=0&limit=100`]
-      ];
-      for (const [label, path] of probes) {
-        const r = await api.getRaw(path);
-        const data = (_d = safeJson(r.text)) == null ? void 0 : _d.data;
-        const count = Array.isArray(data) ? `${data.length} \u9879` : `\u975E\u6570\u7EC4\uFF08${data === null ? "null" : typeof data}\uFF09`;
-        log(`\u300C${task.repoName}\u300D${label} \u2192 ${r.status}\uFF0C${count}`);
-        console.log(`[yuque-style \u8BCA\u65AD] ${label} ${path}
-  status=${r.status}
-  ${r.text.slice(0, 3e3)}`);
-        if (r.status !== 200) log(`  \u54CD\u5E94\uFF1A${r.text.slice(0, 200)}`, "error");
-      }
-    }
-    log("\u2014\u2014 \u5B8C\u6574\u539F\u59CB\u54CD\u5E94\u5DF2\u6253\u5370\u5230\u63A7\u5236\u53F0\uFF08Ctrl+Shift+I \u2192 Console\uFF09\u2014\u2014");
-  });
 }
 
 // src/yuque/relink.ts
@@ -3192,7 +3698,7 @@ async function relinkFlow(plugin) {
 }
 
 // src/yuque/clean.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 async function walkSyncedDocs(plugin, log, signal, transform) {
   const state = plugin.settings.yuqueSyncState || {};
   const entries = Object.entries(state).filter(([, rec]) => !!(rec == null ? void 0 : rec.path));
@@ -3207,7 +3713,7 @@ async function walkSyncedDocs(plugin, log, signal, transform) {
     processed++;
     if (processed % 200 === 0) log(`\u5DF2\u5904\u7406 ${processed}/${entries.length} \u7BC7\u2026`);
     const file = plugin.app.vault.getAbstractFileByPath(`${rec.path}.md`);
-    if (!(file instanceof import_obsidian7.TFile)) continue;
+    if (!(file instanceof import_obsidian11.TFile)) continue;
     stats.scanned++;
     const content = await plugin.app.vault.cachedRead(file);
     const patch = transform(content);
@@ -3248,7 +3754,7 @@ async function cleanColorsFlow(plugin) {
 }
 
 // src/yuque/backfill.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian12 = require("obsidian");
 var ORPHAN_LOG_LIMIT = 50;
 async function backfillMetadata(plugin, log, signal) {
   var _a;
@@ -3268,7 +3774,7 @@ async function backfillMetadata(plugin, log, signal) {
     log("\u8FD8\u6CA1\u6709\u540C\u6B65\u4EFB\u52A1\uFF0C\u65E0\u9700\u8865\u9F50", "error");
     return stats;
   }
-  const api = new YuqueApi(settings.yuqueToken);
+  const api = plugin.createApi();
   log("\u53EA\u8C03\u6587\u6863\u5217\u8868\u63A5\u53E3\uFF08\u6BCF 100 \u7BC7 1 \u6B21\u8BF7\u6C42\uFF09\uFF0C\u4E0D\u62C9\u6B63\u6587\u3001\u4E0D\u52A8\u56FE\u7247\u3002");
   const summaryByNs = /* @__PURE__ */ new Map();
   for (const ns of namespaces) {
@@ -3305,7 +3811,7 @@ async function backfillMetadata(plugin, log, signal) {
     }
     stats.scanned++;
     const file = plugin.app.vault.getAbstractFileByPath(`${rec.path}.md`);
-    if (!(file instanceof import_obsidian8.TFile)) {
+    if (!(file instanceof import_obsidian12.TFile)) {
       stats.skipped++;
       continue;
     }
@@ -3341,7 +3847,7 @@ async function backfillMetadata(plugin, log, signal) {
 }
 async function backfillFlow(plugin) {
   if (!plugin.settings.yuqueToken) {
-    new import_obsidian8.Notice("\u8BF7\u5148\u5728\u63D2\u4EF6\u8BBE\u7F6E\u4E2D\u586B\u5199\u8BED\u96C0 Token");
+    new import_obsidian12.Notice("\u8BF7\u5148\u5728\u63D2\u4EF6\u8BBE\u7F6E\u4E2D\u586B\u5199\u8BED\u96C0 Token");
     return;
   }
   await runWithSyncModal(
@@ -3361,41 +3867,1277 @@ async function backfillFlow(plugin) {
   );
 }
 
+// src/yuque/orphan.ts
+var import_obsidian13 = require("obsidian");
+function pickOrphans(state, summaryKeysByNs) {
+  const out = [];
+  for (const [key, rec] of Object.entries(state)) {
+    if (!(rec == null ? void 0 : rec.path)) continue;
+    const ns = key.slice(0, key.lastIndexOf("/"));
+    const keys = summaryKeysByNs.get(ns);
+    if (!keys || keys.has(key)) continue;
+    out.push({ key, path: rec.path, title: rec.title || rec.path.split("/").pop() || rec.path });
+  }
+  return out;
+}
+async function fetchDocKeys(plugin, log, signal) {
+  const namespaces = [...new Set((plugin.settings.yuqueTasks || []).map((t) => t.namespace))];
+  const keysByNs = /* @__PURE__ */ new Map();
+  const failed = [];
+  if (namespaces.length === 0) return { keysByNs, failed };
+  const api = plugin.createApi();
+  for (const ns of namespaces) {
+    if (signal == null ? void 0 : signal.aborted) break;
+    try {
+      const docs = await api.getDocList(ns);
+      const keys = /* @__PURE__ */ new Set();
+      for (const d of docs) keys.add(stateKey(ns, d.slug));
+      keysByNs.set(ns, keys);
+      log(`\u300C${ns}\u300D\uFF1A\u8BED\u96C0\u7AEF ${docs.length} \u7BC7`);
+    } catch (e) {
+      failed.push(ns);
+      log(`\u62C9\u53D6\u300C${ns}\u300D\u6587\u6863\u5217\u8868\u5931\u8D25\uFF0C\u8BE5\u5E93\u8DF3\u8FC7\u6BD4\u5BF9\uFF1A${e.message}`, "error");
+    }
+  }
+  return { keysByNs, failed };
+}
+var OrphanConfirmModal = class extends import_obsidian13.Modal {
+  constructor(plugin, orphans, onDecide) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.orphans = orphans;
+    this.onDecide = onDecide;
+  }
+  onOpen() {
+    this.titleEl.setText("\u6E05\u7406\u5B64\u513F\u6587\u6863\u526F\u672C");
+    this.modalEl.addClass("yuque-sync-modal");
+    const { contentEl } = this;
+    contentEl.createEl("p", {
+      text: `\u4EE5\u4E0B ${this.orphans.length} \u7BC7\u6587\u6863\u5728\u8BED\u96C0\u7AEF\u5DF2\u4E0D\u5B58\u5728\uFF08\u6216\u88AB\u79FB\u51FA\u77E5\u8BC6\u5E93\uFF09\u3002\u5220\u9664\u4F1A\u79FB\u5165\u7CFB\u7EDF\u56DE\u6536\u7AD9\uFF08\u53EF\u6062\u590D\uFF09\uFF0C\u540C\u65F6\u6E05\u9664\u5BF9\u5E94\u7684\u540C\u6B65\u8BB0\u5F55\u3002`
+    });
+    const list = contentEl.createEl("ul", { cls: "yuque-orphan-list" });
+    const SHOW = 30;
+    for (const o of this.orphans.slice(0, SHOW)) {
+      list.createEl("li", { text: o.title ? `${o.title}\uFF08${o.path}\uFF09` : o.path });
+    }
+    if (this.orphans.length > SHOW) {
+      contentEl.createEl("p", {
+        cls: "setting-item-description",
+        text: `\u2026\u7B49\u5171 ${this.orphans.length} \u7BC7`
+      });
+    }
+    const actions = contentEl.createDiv({ cls: "yuque-orphan-actions" });
+    const cancel = actions.createEl("button", { text: "\u53D6\u6D88" });
+    cancel.addEventListener("click", () => {
+      this.close();
+      this.onDecide(false);
+    });
+    const confirm = actions.createEl("button", {
+      text: `\u79FB\u5165\u56DE\u6536\u7AD9\uFF08${this.orphans.length} \u7BC7\uFF09`,
+      cls: "mod-warning"
+    });
+    confirm.addEventListener("click", () => {
+      this.close();
+      this.onDecide(true);
+    });
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+async function removeOrphanCopy(plugin, orphan) {
+  const file = plugin.app.vault.getAbstractFileByPath(`${orphan.path}.md`);
+  if (file instanceof import_obsidian13.TFile) {
+    await plugin.app.vault.trash(file, true);
+  }
+  delete plugin.settings.yuqueSyncState[orphan.key];
+  return file instanceof import_obsidian13.TFile ? "trashed" : "missing";
+}
+async function orphanCleanupFlow(plugin) {
+  if (!plugin.settings.yuqueToken) {
+    new import_obsidian13.Notice("\u8BF7\u5148\u5728\u63D2\u4EF6\u8BBE\u7F6E\u4E2D\u586B\u5199\u8BED\u96C0 Token");
+    return;
+  }
+  await runWithSyncModal(
+    plugin,
+    "\u6E05\u7406\u5B64\u513F\u6587\u6863\u526F\u672C",
+    async (log, _modal, signal) => {
+      log("\u53EA\u8C03\u6587\u6863\u5217\u8868\u63A5\u53E3\u6BD4\u5BF9\uFF0C\u4E0D\u62C9\u6B63\u6587\uFF1B\u786E\u8BA4\u540E\u6587\u4EF6\u79FB\u5165\u7CFB\u7EDF\u56DE\u6536\u7AD9\uFF08\u53EF\u6062\u590D\uFF09\u3002");
+      const { keysByNs, failed } = await fetchDocKeys(plugin, log, signal);
+      if (keysByNs.size === 0) {
+        log("\u6CA1\u6709\u6210\u529F\u53D6\u5230\u4EFB\u4F55\u77E5\u8BC6\u5E93\u7684\u5217\u8868\uFF0C\u65E0\u6CD5\u6BD4\u5BF9\uFF08\u9632\u8BEF\u5220\uFF1A\u4E0D\u5BF9\u6B64\u4E0B\u7ED3\u8BBA\uFF09\u3002", "error");
+        return;
+      }
+      const orphans = pickOrphans(plugin.settings.yuqueSyncState, keysByNs);
+      if (orphans.length === 0) {
+        log("\u672A\u53D1\u73B0\u5B64\u513F\u6587\u6863\uFF1A\u540C\u6B65\u8BB0\u5F55\u4E0E\u8BED\u96C0\u7AEF\u4E00\u81F4\u3002", "success");
+        return;
+      }
+      log(`\u53D1\u73B0 ${orphans.length} \u7BC7\u5B64\u513F\u526F\u672C\uFF0C\u7B49\u5F85\u786E\u8BA4\u3002`);
+      const confirmed = await new Promise((resolve) => {
+        new OrphanConfirmModal(plugin, orphans, resolve).open();
+      });
+      if (!confirmed) {
+        log("\u5DF2\u53D6\u6D88\uFF0C\u672A\u5220\u9664\u4EFB\u4F55\u6587\u4EF6\u3002");
+        return;
+      }
+      let trashed = 0;
+      let missing = 0;
+      let dirty = false;
+      for (const o of orphans) {
+        if (signal == null ? void 0 : signal.aborted) {
+          log("\u5DF2\u505C\u6B62\uFF1B\u5269\u4F59\u6761\u76EE\u672A\u5904\u7406", "error");
+          break;
+        }
+        try {
+          const r = await removeOrphanCopy(plugin, o);
+          if (r === "trashed") trashed++;
+          else missing++;
+          dirty = true;
+        } catch (e) {
+          log(`\u300C${o.path}\u300D\u5220\u9664\u5931\u8D25\uFF1A${e.message}`, "error");
+        }
+      }
+      if (dirty) await plugin.saveSettings();
+      log(
+        `\u5B8C\u6210\uFF1A\u79FB\u5165\u56DE\u6536\u7AD9 ${trashed} \u7BC7` + (missing > 0 ? `\uFF08\u53E6\u6709 ${missing} \u7BC7\u672C\u5730\u5DF2\u4E0D\u5B58\u5728\uFF0C\u53EA\u6E05\u4E86\u8BB0\u5F55\uFF09` : "") + "\u3002\u540C\u6B65\u8BB0\u5F55\u5DF2\u540C\u6B65\u6E05\u7406\u3002",
+        "success"
+      );
+      if (failed.length > 0) {
+        log(`\u4EE5\u4E0B\u77E5\u8BC6\u5E93\u5217\u8868\u62C9\u53D6\u5931\u8D25\uFF0C\u672C\u6B21\u672A\u53C2\u4E0E\u6BD4\u5BF9\uFF1A${failed.join("\u3001")}`, "error");
+      }
+    },
+    { stoppable: true }
+  );
+}
+
+// src/topbar.ts
+var import_obsidian14 = require("obsidian");
+
+// src/rich-actions.ts
+var HEADING_RE = /^(#{1,6})\s+/;
+var QUOTE_RE = /^>\s?/;
+var LIST_RES = {
+  // 待办也以 `- ` 开头，所以无序列表要把它排除，否则「点无序列表」会把待办方框吃掉
+  bullet: /^[-*+]\s+(?!\[[ xX]\])/,
+  ordered: /^\d+[.)]\s+/,
+  task: /^[-*+]\s+\[[ xX]\]/
+};
+var ANY_LIST_RE = /^(?:[-*+]\s+(?:\[[ xX]\]\s*)?|\d+[.)]\s+)/;
+var PARAGRAPH_STYLES = [
+  { id: "body", label: "\u6B63\u6587" },
+  { id: "h1", label: "\u6807\u9898 1" },
+  { id: "h2", label: "\u6807\u9898 2" },
+  { id: "h3", label: "\u6807\u9898 3" },
+  { id: "h4", label: "\u6807\u9898 4" },
+  { id: "h5", label: "\u6807\u9898 5" },
+  { id: "h6", label: "\u6807\u9898 6" },
+  { id: "quote", label: "\u5F15\u7528\u5757" }
+];
+function paragraphStyleLabel(style) {
+  var _a, _b;
+  return (_b = (_a = PARAGRAPH_STYLES.find((s) => s.id === style)) == null ? void 0 : _a.label) != null ? _b : "\u6B63\u6587";
+}
+function prefixOf(style) {
+  if (style === "quote") return "> ";
+  if (style === "body") return "";
+  return `${"#".repeat(Number(style.slice(1)))} `;
+}
+function paragraphStyleOf(line) {
+  const heading = line.match(HEADING_RE);
+  if (heading) return `h${heading[1].length}`;
+  if (QUOTE_RE.test(line)) return "quote";
+  return "body";
+}
+function prefixLength(text) {
+  const heading = text.match(HEADING_RE);
+  if (heading) return heading[0].length;
+  const quote = text.match(QUOTE_RE);
+  if (quote) return quote[0].length;
+  return 0;
+}
+function selectionText(s) {
+  var _a, _b;
+  if (s.from.line === s.to.line) {
+    return ((_a = s.lines[s.from.line]) != null ? _a : "").slice(s.from.ch, s.to.ch);
+  }
+  const parts = [];
+  for (let n = s.from.line; n <= s.to.line; n++) {
+    const text = (_b = s.lines[n]) != null ? _b : "";
+    if (n === s.from.line) parts.push(text.slice(s.from.ch));
+    else if (n === s.to.line) parts.push(text.slice(0, s.to.ch));
+    else parts.push(text);
+  }
+  return parts.join("\n");
+}
+function selectedLines(s) {
+  const last = s.to.ch === 0 && s.to.line > s.from.line ? s.to.line - 1 : s.to.line;
+  return { first: s.from.line, last: Math.max(s.from.line, last) };
+}
+function advance(pos, text) {
+  const parts = text.split("\n");
+  if (parts.length === 1) return { line: pos.line, ch: pos.ch + text.length };
+  return { line: pos.line + parts.length - 1, ch: parts[parts.length - 1].length };
+}
+function rewriteLines(s, rewrite) {
+  var _a;
+  const { first, last } = selectedLines(s);
+  const edits = [];
+  let deltaFirst = 0;
+  let deltaLast = 0;
+  for (let n = first; n <= last; n++) {
+    const text = (_a = s.lines[n]) != null ? _a : "";
+    const next = rewrite(n, text);
+    if (next === null || next === text) continue;
+    edits.push({ from: { line: n, ch: 0 }, to: { line: n, ch: text.length }, text: next });
+    const delta = next.length - text.length;
+    if (n === first) deltaFirst = delta;
+    deltaLast = delta;
+  }
+  if (edits.length === 0) return { edits: [] };
+  return {
+    edits,
+    selection: {
+      from: { line: s.from.line, ch: Math.max(0, s.from.ch + deltaFirst) },
+      to: { line: s.to.line, ch: Math.max(0, s.to.ch + deltaLast) }
+    }
+  };
+}
+function setParagraphStyle(s, style) {
+  const prefix = prefixOf(style);
+  return rewriteLines(s, (_n, text) => {
+    const body = text.slice(prefixLength(text));
+    if (prefix === "" && body === text) return null;
+    return `${prefix}${body}`;
+  });
+}
+function toggleList(s, kind) {
+  const { first, last } = selectedLines(s);
+  const lines = [];
+  for (let n = first; n <= last; n++) lines.push(n);
+  const marker = kind === "bullet" ? "- " : kind === "ordered" ? "1. " : "- [ ] ";
+  const allSame = lines.every((n) => {
+    var _a, _b;
+    return LIST_RES[kind].test(((_a = s.lines[n]) != null ? _a : "").slice(leadingSpace((_b = s.lines[n]) != null ? _b : "").length));
+  });
+  return rewriteLines(s, (_n, text) => {
+    const indent = leadingSpace(text);
+    const body = text.slice(indent.length).replace(ANY_LIST_RE, "");
+    const head = allSame ? "" : marker;
+    return `${indent}${head}${body}`;
+  });
+}
+function leadingSpace(text) {
+  var _a, _b;
+  return (_b = (_a = text.match(/^[ \t]*/)) == null ? void 0 : _a[0]) != null ? _b : "";
+}
+function toggleWrap(s, open, close = open) {
+  var _a;
+  if (s.from.line === s.to.line && s.from.ch === s.to.ch) {
+    const cursor = { line: s.from.line, ch: s.from.ch + open.length };
+    return {
+      edits: [{ from: s.from, to: s.from, text: `${open}${close}` }],
+      selection: { from: cursor, to: { ...cursor } }
+    };
+  }
+  const inner = selectionText(s);
+  if (inner.length >= open.length + close.length && inner.startsWith(open) && inner.endsWith(close)) {
+    const stripped = inner.slice(open.length, inner.length - close.length);
+    return {
+      edits: [{ from: s.from, to: s.to, text: stripped }],
+      selection: { from: s.from, to: advance(s.from, stripped) }
+    };
+  }
+  if (s.from.line === s.to.line) {
+    const line = (_a = s.lines[s.from.line]) != null ? _a : "";
+    const before = line.slice(Math.max(0, s.from.ch - open.length), s.from.ch);
+    const after = line.slice(s.to.ch, s.to.ch + close.length);
+    if (before === open && after === close) {
+      const start = { line: s.from.line, ch: s.from.ch - open.length };
+      return {
+        edits: [
+          { from: start, to: s.from, text: "" },
+          { from: s.to, to: { line: s.to.line, ch: s.to.ch + close.length }, text: "" }
+        ],
+        selection: { from: start, to: { line: s.to.line, ch: s.to.ch - open.length } }
+      };
+    }
+  }
+  const wrapped = `${open}${inner}${close}`;
+  return {
+    edits: [{ from: s.from, to: s.to, text: wrapped }],
+    selection: {
+      from: { line: s.from.line, ch: s.from.ch + open.length },
+      to: advance({ line: s.from.line, ch: s.from.ch }, `${open}${inner}`)
+    }
+  };
+}
+function wrapCodeBlock(s, lang = "") {
+  const fence = `\`\`\`${lang}`;
+  const inner = selectionText(s);
+  if (inner) {
+    return { edits: [{ from: s.from, to: s.to, text: `${fence}
+${inner}
+\`\`\`` }] };
+  }
+  const cursor = advance(s.from, `${fence}
+`);
+  return {
+    edits: [{ from: s.from, to: s.from, text: `${fence}
+
+\`\`\`` }],
+    selection: { from: cursor, to: { ...cursor } }
+  };
+}
+function insertBlockAtCursor(s, block) {
+  var _a;
+  const line = (_a = s.lines[s.from.line]) != null ? _a : "";
+  const emptyLine = line.trim() === "";
+  const at = emptyLine ? s.from : { line: s.from.line, ch: line.length };
+  const insert = emptyLine ? `${block}
+` : `
+
+${block}
+`;
+  const cursor = advance(at, insert);
+  return {
+    edits: [{ from: at, to: at, text: insert }],
+    selection: { from: cursor, to: { ...cursor } }
+  };
+}
+function insertLink(s, url) {
+  const label = selectionText(s);
+  if (label) {
+    const text = `[${label}](${url})`;
+    return { edits: [{ from: s.from, to: s.to, text }], selection: { from: s.from, to: advance(s.from, text) } };
+  }
+  const cursor = { line: s.from.line, ch: s.from.ch + 1 };
+  return {
+    edits: [{ from: s.from, to: s.from, text: `[](${url})` }],
+    selection: { from: cursor, to: { ...cursor } }
+  };
+}
+function setTextColor(s, color) {
+  const inner = selectionText(s);
+  if (!inner) return null;
+  if (color === null) {
+    const stripped = inner.replace(/<\/?span[^>]*>/gi, "");
+    if (stripped === inner) return null;
+    return { edits: [{ from: s.from, to: s.to, text: stripped }], selection: { from: s.from, to: advance(s.from, stripped) } };
+  }
+  const open = `<span style="color:${color}">`;
+  const text = `${open}${inner}</span>`;
+  return { edits: [{ from: s.from, to: s.to, text }], selection: { from: s.from, to: advance(s.from, text) } };
+}
+var INLINE_MARKS = [
+  /<\/?u>/gi,
+  /<\/?span[^>]*>/gi,
+  /<\/?em>/gi,
+  /<\/?strong>/gi,
+  /\*\*/g,
+  /~~/g,
+  /==/g,
+  /`{1,3}/g,
+  /<br\s*\/?>/gi,
+  /\*/g,
+  /__/g
+];
+function clearFormatting(s) {
+  const inner = selectionText(s);
+  if (!inner) return null;
+  let next = inner;
+  for (const re of INLINE_MARKS) next = next.replace(re, "");
+  if (next === inner) return null;
+  return { edits: [{ from: s.from, to: s.to, text: next }], selection: { from: s.from, to: advance(s.from, next) } };
+}
+
+// src/topbar.ts
+var BAR_CLS = "yuque-topbar";
+var HOST_CLS = "yuque-has-topbar";
+var COLLAPSED_CLS = "yuque-topbar-collapsed";
+var HIDDEN_CLS = "yuque-topbar-hidden";
+var FULL_META_INTERVAL = 15e3;
+function snapshotOf(editor) {
+  const lines = [];
+  const count = editor.lineCount();
+  for (let i = 0; i < count; i++) lines.push(editor.getLine(i));
+  const from = editor.getCursor("from");
+  const to = editor.getCursor("to");
+  return {
+    lines,
+    from: { line: from.line, ch: from.ch },
+    to: { line: to.line, ch: to.ch }
+  };
+}
+function applyPlan(editor, plan) {
+  if (plan.edits.length === 0) return;
+  const ordered = [...plan.edits].sort(
+    (a, b) => b.from.line - a.from.line || b.from.ch - a.from.ch
+  );
+  for (const edit of ordered) editor.replaceRange(edit.text, edit.from, edit.to);
+  if (plan.selection) editor.setSelection(plan.selection.from, plan.selection.to);
+}
+var YuqueTopBar = class {
+  constructor(plugin, view) {
+    this.plugin = plugin;
+    this.view = view;
+    this.timeValueEl = null;
+    this.collapsed = false;
+    this.words = null;
+    /** 字数缓存键：`路径|mtime`，文件一改就重算 */
+    this.wordsKey = "";
+    this.lastFullMeta = 0;
+    this.mounted = false;
+    this.el = createEl("div", { cls: BAR_CLS });
+    this.toolsEl = this.el.createDiv({ cls: "yuque-topbar-tools" });
+    this.toolsScrollEl = this.toolsEl.createDiv({ cls: "yuque-topbar-tools-scroll" });
+    this.metaEl = this.el.createDiv({ cls: "yuque-topbar-meta" });
+    this.titleEl = this.metaEl.createDiv({ cls: "yuque-topbar-title" });
+    this.chipsEl = this.metaEl.createDiv({ cls: "yuque-topbar-chips" });
+    this.styleBtn = this.buildTools();
+    this.buildCollapseButton();
+    this.updateStyleButton();
+  }
+  // ---------------- 挂载 ----------------
+  mount(host) {
+    if (this.mounted && this.el.parentElement === host) {
+      this.refresh();
+      return;
+    }
+    host.classList.add(HOST_CLS);
+    host.insertBefore(this.el, host.firstChild);
+    this.mounted = true;
+    this.refresh(true);
+  }
+  destroy() {
+    var _a;
+    (_a = this.el.parentElement) == null ? void 0 : _a.classList.remove(HOST_CLS);
+    this.el.remove();
+    this.mounted = false;
+  }
+  /** 轮询里的轻量刷新：补挂（若被清掉）+ 模式类名 + 相对时间 */
+  tick() {
+    if (this.mounted && this.el.parentElement !== this.view.contentEl) {
+      this.mount(this.view.contentEl);
+    }
+    this.refresh(false);
+  }
+  // ---------------- 工具栏 ----------------
+  buildTools() {
+    const add = (opts) => {
+      const btn = this.toolsScrollEl.createEl("button", {
+        cls: "yuque-topbar-btn",
+        attr: { title: opts.title, "aria-label": opts.title }
+      });
+      if (opts.icon) (0, import_obsidian14.setIcon)(btn, opts.icon);
+      else if (opts.label) btn.setText(opts.label);
+      btn.addEventListener("mousedown", (evt) => {
+        evt.preventDefault();
+        evt.stopPropagation();
+        opts.onClick(evt);
+      });
+      return btn;
+    };
+    const sep = () => {
+      this.toolsScrollEl.createDiv({ cls: "yuque-topbar-sep" });
+    };
+    add({ icon: "undo-2", title: "\u64A4\u9500", onClick: () => this.runEditor((e) => e.undo()) });
+    add({ icon: "redo-2", title: "\u91CD\u505A", onClick: () => this.runEditor((e) => e.redo()) });
+    sep();
+    const styleBtn = add({
+      label: "\u6B63\u6587",
+      title: "\u6BB5\u843D\u6837\u5F0F",
+      onClick: (evt) => this.openStyleMenu(evt)
+    });
+    styleBtn.addClass("yuque-topbar-style");
+    sep();
+    add({ icon: "bold", title: "\u52A0\u7C97", onClick: () => this.runPlan((s2) => toggleWrap(s2, "**")) });
+    add({ icon: "italic", title: "\u659C\u4F53", onClick: () => this.runPlan((s2) => toggleWrap(s2, "*")) });
+    add({
+      icon: "strikethrough",
+      title: "\u5220\u9664\u7EBF",
+      onClick: () => this.runPlan((s2) => toggleWrap(s2, "~~"))
+    });
+    add({
+      icon: "underline",
+      title: "\u4E0B\u5212\u7EBF",
+      onClick: () => this.runPlan((s2) => toggleWrap(s2, "<u>", "</u>"))
+    });
+    add({
+      icon: "highlighter",
+      title: "\u9AD8\u4EAE",
+      onClick: () => this.runPlan((s2) => toggleWrap(s2, "=="))
+    });
+    add({ icon: "code", title: "\u884C\u5185\u4EE3\u7801", onClick: () => this.runPlan((s2) => toggleWrap(s2, "`")) });
+    add({ icon: "palette", title: "\u6587\u5B57\u989C\u8272", onClick: () => this.openColorModal() });
+    add({
+      icon: "eraser",
+      title: "\u6E05\u9664\u683C\u5F0F",
+      onClick: () => this.runPlan((s2) => clearFormatting(s2), "\u8BF7\u5148\u9009\u4E2D\u8981\u6E05\u9664\u683C\u5F0F\u7684\u6587\u5B57")
+    });
+    sep();
+    add({
+      icon: "list",
+      title: "\u65E0\u5E8F\u5217\u8868",
+      onClick: () => this.runPlan((s2) => toggleList(s2, "bullet"))
+    });
+    add({
+      icon: "list-ordered",
+      title: "\u6709\u5E8F\u5217\u8868",
+      onClick: () => this.runPlan((s2) => toggleList(s2, "ordered"))
+    });
+    add({
+      icon: "list-checks",
+      title: "\u5F85\u529E\u6E05\u5355",
+      onClick: () => this.runPlan((s2) => toggleList(s2, "task"))
+    });
+    add({
+      icon: "quote",
+      title: "\u5F15\u7528\u5757",
+      onClick: () => this.runPlan((s2) => {
+        var _a;
+        const style = paragraphStyleOf((_a = s2.lines[s2.from.line]) != null ? _a : "");
+        return setParagraphStyle(s2, style === "quote" ? "body" : "quote");
+      })
+    });
+    add({ icon: "braces", title: "\u4EE3\u7801\u5757", onClick: () => this.runPlan((s2) => wrapCodeBlock(s2)) });
+    add({
+      icon: "minus",
+      title: "\u5206\u5272\u7EBF",
+      onClick: () => this.runPlan((s2) => insertBlockAtCursor(s2, "---"))
+    });
+    sep();
+    add({ icon: "link", title: "\u63D2\u5165\u94FE\u63A5", onClick: () => this.openLinkModal() });
+    add({
+      icon: "plus",
+      title: "\u63D2\u5165\u5185\u5BB9\u5757\uFF08\u5361\u7247 / \u6298\u53E0 / \u76EE\u5F55 / \u8868\u683C\u2026\uFF09",
+      onClick: (evt) => this.openInsertMenu(evt)
+    });
+    return styleBtn;
+  }
+  buildCollapseButton() {
+    const btn = this.toolsEl.createEl("button", {
+      cls: "yuque-topbar-collapse",
+      attr: { title: "\u6536\u8D77 / \u5C55\u5F00\u5DE5\u5177\u680F", "aria-label": "\u6536\u8D77 / \u5C55\u5F00\u5DE5\u5177\u680F" }
+    });
+    (0, import_obsidian14.setIcon)(btn, "chevron-up");
+    btn.addEventListener("mousedown", (evt) => evt.preventDefault());
+    btn.addEventListener("click", () => {
+      this.collapsed = !this.collapsed;
+      this.el.classList.toggle(COLLAPSED_CLS, this.collapsed);
+      (0, import_obsidian14.setIcon)(btn, this.collapsed ? "chevron-down" : "chevron-up");
+    });
+  }
+  /** 直接在编辑器上执行的动作（撤销 / 重做） */
+  runEditor(run) {
+    const editor = this.view.editor;
+    if (!editor) return;
+    run(editor);
+    editor.focus();
+  }
+  runPlan(compute, emptyHint) {
+    const editor = this.view.editor;
+    if (!editor) return;
+    const plan = compute(snapshotOf(editor));
+    if (!plan || plan.edits.length === 0) {
+      if (emptyHint) new import_obsidian14.Notice(emptyHint);
+      return;
+    }
+    applyPlan(editor, plan);
+    this.updateStyleButton();
+    editor.focus();
+  }
+  openStyleMenu(evt) {
+    const editor = this.view.editor;
+    const current = editor ? paragraphStyleOf(editor.getLine(editor.getCursor().line)) : "body";
+    const menu = new import_obsidian14.Menu();
+    for (const style of PARAGRAPH_STYLES) {
+      menu.addItem(
+        (item) => item.setTitle(style.label).setChecked(style.id === current).onClick(() => this.runPlan((s) => setParagraphStyle(s, style.id)))
+      );
+    }
+    menu.showAtMouseEvent(evt);
+  }
+  openColorModal() {
+    const editor = this.view.editor;
+    if (!editor) return;
+    new ColorModal(this.plugin.app, (color) => {
+      const plan = setTextColor(snapshotOf(editor), color);
+      if (!plan) {
+        new import_obsidian14.Notice("\u8BF7\u5148\u9009\u4E2D\u8981\u4E0A\u8272\u7684\u6587\u5B57");
+        return;
+      }
+      applyPlan(editor, plan);
+      editor.focus();
+    }).open();
+  }
+  openLinkModal() {
+    const editor = this.view.editor;
+    if (!editor) return;
+    const hasText = editor.getSelection().length > 0;
+    new LinkModal(this.plugin.app, hasText, (url) => {
+      if (!url) return;
+      applyPlan(editor, insertLink(snapshotOf(editor), url));
+      editor.focus();
+    }).open();
+  }
+  /** 「插入」下拉：直接复用斜杠菜单的条目定义，两个入口不会各写一份块语法 */
+  openInsertMenu(evt) {
+    const menu = new import_obsidian14.Menu();
+    for (const item of ITEMS.filter((it) => !it.keywordOnly)) {
+      menu.addItem(
+        (mi) => mi.setTitle(item.name).onClick(() => {
+          const editor = this.view.editor;
+          if (!editor) return;
+          applySlashItem({
+            app: this.plugin.app,
+            editor,
+            item,
+            file: this.view.file
+          });
+          this.updateStyleButton();
+          editor.focus();
+        })
+      );
+    }
+    menu.showAtMouseEvent(evt);
+  }
+  /** 光标所在行的段落样式回显到下拉按钮上（语雀那栏也是这么显示的） */
+  updateStyleButton() {
+    const editor = this.view.editor;
+    if (!editor) return;
+    const style = paragraphStyleOf(editor.getLine(editor.getCursor().line));
+    this.styleBtn.setText(paragraphStyleLabel(style));
+  }
+  // ---------------- 元信息行 ----------------
+  updateMode() {
+    const mode = this.view.getMode();
+    const editing = mode === "source" && !!this.view.file;
+    this.el.classList.toggle(HIDDEN_CLS, !this.plugin.settings.topBar || !editing);
+  }
+  refresh(force = false) {
+    this.updateMode();
+    const now = Date.now();
+    if (!force && now - this.lastFullMeta < FULL_META_INTERVAL) {
+      this.updateRelativeTime(now);
+      return;
+    }
+    this.lastFullMeta = now;
+    void this.refreshMeta(now);
+  }
+  /** 只改「最近编辑」那一格的文字，轮询时用它，避免每次重建整行 DOM */
+  updateRelativeTime(now) {
+    const file = this.view.file;
+    if (!file || !this.timeValueEl) return;
+    this.timeValueEl.setText(formatRelativeTime(file.stat.mtime, now));
+  }
+  async refreshMeta(now) {
+    var _a, _b, _c;
+    const file = this.view.file;
+    if (!file) {
+      this.titleEl.setText("");
+      this.chipsEl.empty();
+      this.timeValueEl = null;
+      return;
+    }
+    const fm = (_a = this.plugin.app.metadataCache.getFileCache(file)) == null ? void 0 : _a.frontmatter;
+    this.titleEl.setText(String((_b = readFm(fm, "title")) != null ? _b : file.basename));
+    const chips = this.chipsEl;
+    chips.empty();
+    this.timeValueEl = null;
+    const chip = (label, value, cls = "") => {
+      const el = chips.createDiv({ cls: `yuque-topbar-chip ${cls}`.trim() });
+      if (label) el.createSpan({ cls: "yuque-topbar-chip-label", text: label });
+      return el.createSpan({ cls: "yuque-topbar-chip-value", text: value });
+    };
+    chip("\u6700\u8FD1\u7F16\u8F91", formatRelativeTime(file.stat.mtime, now));
+    const key = `${file.path}|${file.stat.mtime}`;
+    if (this.words === null || this.wordsKey !== key) {
+      const content = await this.plugin.app.vault.cachedRead(file);
+      if (this.view.file !== file) return;
+      this.words = countWords(content);
+      this.wordsKey = key;
+    }
+    const words = (_c = this.words) != null ? _c : 0;
+    chip("", formatWordCount(words), "yuque-topbar-chip-plain");
+    chip("", `\u7EA6 ${readingMinutes(words)} \u5206\u949F\u8BFB\u5B8C`, "yuque-topbar-chip-plain");
+    const badge = syncBadge(readFm(fm, "source"), readFm(fm, "updatedAt"));
+    const syncEl = chips.createDiv({
+      cls: `yuque-topbar-chip yuque-topbar-sync is-${badge.kind}`,
+      attr: badge.url ? { title: "\u6253\u5F00\u8BED\u96C0\u539F\u6587" } : {}
+    });
+    syncEl.createSpan({ cls: "yuque-topbar-dot" });
+    const textEl = syncEl.createSpan({ cls: "yuque-topbar-chip-value", text: badge.text });
+    if (badge.url) {
+      syncEl.addClass("is-clickable");
+      const url = badge.url;
+      syncEl.addEventListener("click", () => window.open(url, "_blank"));
+      textEl.addClass("yuque-topbar-link");
+    }
+  }
+};
+var TopBarManager = class {
+  constructor(plugin) {
+    this.plugin = plugin;
+    this.bars = /* @__PURE__ */ new Map();
+  }
+  register() {
+    const { workspace, vault, metadataCache } = this.plugin.app;
+    this.plugin.registerEvent(workspace.on("layout-change", () => this.sync()));
+    this.plugin.registerEvent(workspace.on("active-leaf-change", () => this.sync()));
+    this.plugin.registerEvent(workspace.on("file-open", () => this.sync()));
+    this.plugin.registerEvent(vault.on("modify", (f) => this.onFileChanged(f.path)));
+    this.plugin.registerEvent(metadataCache.on("changed", (f) => this.onFileChanged(f.path)));
+    this.plugin.registerInterval(window.setInterval(() => this.tick(), 1500));
+    this.sync();
+  }
+  /** 补挂缺失的顶栏、清掉已关闭视图上的顶栏 */
+  sync() {
+    const live = /* @__PURE__ */ new Set();
+    if (this.plugin.settings.topBar) {
+      for (const leaf of this.plugin.app.workspace.getLeavesOfType("markdown")) {
+        const view = leaf.view;
+        if (!view || typeof view.getMode !== "function") continue;
+        live.add(view);
+        let bar = this.bars.get(view);
+        if (!bar) {
+          bar = new YuqueTopBar(this.plugin, view);
+          this.bars.set(view, bar);
+        }
+        bar.mount(view.contentEl);
+      }
+    }
+    for (const [view, bar] of [...this.bars]) {
+      if (live.has(view)) continue;
+      bar.destroy();
+      this.bars.delete(view);
+    }
+  }
+  /** 插件卸载：把已插进内容区的顶栏全部摘掉，不留残留 DOM */
+  destroyAll() {
+    for (const bar of this.bars.values()) bar.destroy();
+    this.bars.clear();
+  }
+  /** 设置变化后强制刷新（开关、元信息、阅读时长等都可能变） */
+  refresh(force = true) {
+    this.sync();
+    for (const bar of this.bars.values()) bar.refresh(force);
+  }
+  tick() {
+    if (!this.plugin.settings.topBar) return;
+    for (const bar of this.bars.values()) bar.tick();
+  }
+  onFileChanged(path) {
+    var _a;
+    for (const [view, bar] of this.bars) {
+      if (((_a = view.file) == null ? void 0 : _a.path) === path) bar.refresh(true);
+    }
+  }
+};
+
+// src/editor-commands.ts
+var import_obsidian15 = require("obsidian");
+var DEFS = [
+  { id: "bold", name: "\u52A0\u7C97", run: (s) => toggleWrap(s, "**") },
+  { id: "italic", name: "\u659C\u4F53", run: (s) => toggleWrap(s, "*") },
+  { id: "strikethrough", name: "\u5220\u9664\u7EBF", run: (s) => toggleWrap(s, "~~") },
+  { id: "underline", name: "\u4E0B\u5212\u7EBF", run: (s) => toggleWrap(s, "<u>", "</u>") },
+  { id: "highlight", name: "\u9AD8\u4EAE", run: (s) => toggleWrap(s, "==") },
+  { id: "inline-code", name: "\u884C\u5185\u4EE3\u7801", run: (s) => toggleWrap(s, "`") },
+  {
+    id: "clear-format",
+    name: "\u6E05\u9664\u683C\u5F0F",
+    run: (s) => clearFormatting(s),
+    hint: "\u8BF7\u5148\u9009\u4E2D\u8981\u6E05\u9664\u683C\u5F0F\u7684\u6587\u5B57"
+  },
+  { id: "bullet-list", name: "\u65E0\u5E8F\u5217\u8868", run: (s) => toggleList(s, "bullet") },
+  { id: "ordered-list", name: "\u6709\u5E8F\u5217\u8868", run: (s) => toggleList(s, "ordered") },
+  { id: "task-list", name: "\u5F85\u529E\u6E05\u5355", run: (s) => toggleList(s, "task") },
+  {
+    id: "quote",
+    name: "\u5F15\u7528\u5757\uFF08\u518D\u6309\u4E00\u6B21\u53D6\u6D88\uFF09",
+    run: (s) => {
+      var _a;
+      const style = paragraphStyleOf((_a = s.lines[s.from.line]) != null ? _a : "");
+      return setParagraphStyle(s, style === "quote" ? "body" : "quote");
+    }
+  },
+  { id: "code-block", name: "\u4EE3\u7801\u5757", run: (s) => wrapCodeBlock(s) },
+  { id: "hr", name: "\u5206\u5272\u7EBF", run: (s) => insertBlockAtCursor(s, "---") }
+];
+function registerEditorCommands(plugin) {
+  for (const def of DEFS) {
+    plugin.addCommand({
+      id: `yuque-fmt-${def.id}`,
+      name: `\u8BED\u96C0\u7F16\u8F91\uFF1A${def.name}`,
+      editorCallback: (editor) => {
+        const plan = def.run(snapshotOf(editor));
+        if (!plan || plan.edits.length === 0) {
+          if (def.hint) new import_obsidian15.Notice(def.hint);
+          return;
+        }
+        applyPlan(editor, plan);
+        editor.focus();
+      }
+    });
+  }
+}
+
+// src/yuque/explorer.ts
+var EXPLORER = '.workspace-leaf-content[data-type="file-explorer"]';
+var HIDDEN_FOLDER_CLASS = "yuque-hidden-folder";
+function cssAttrValue(name) {
+  return name.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+function matchesHiddenFolder(path, folderName) {
+  const name = (folderName || "").trim();
+  if (!name || !path) return false;
+  return path === name || path.endsWith(`/${name}`);
+}
+function buildHiddenFolderCss(folderName) {
+  const name = (folderName || "").trim();
+  if (!name) return "";
+  const v = cssAttrValue(name);
+  const paths = [`[data-path="${v}"]`, `[data-path$="/${v}"]`];
+  const rows = paths.flatMap((p) => [`${EXPLORER} ${p}`, `.nav-folder-title${p}`]);
+  const children = rows.flatMap((s) => [
+    `${s} + .nav-folder-children`,
+    `${s} + .tree-item-children`
+  ]);
+  const shells = paths.flatMap((p) => [
+    `${EXPLORER} .nav-folder:has(> ${p})`,
+    `${EXPLORER} .tree-item:has(> ${p})`
+  ]);
+  const marked = [`.${HIDDEN_FOLDER_CLASS}`];
+  const rule = (selectors) => `${selectors.join(",\n")} {
+  display: none !important;
+}`;
+  const css = [rule(rows), rule(children), rule(shells), rule(marked)].join("\n");
+  const label = name.replace(/\*\//g, "*\\/");
+  return `/* yuque-style\uFF1A\u5728\u6587\u4EF6\u6D4F\u89C8\u5668\u4E2D\u9690\u85CF\u56FE\u7247\u6587\u4EF6\u5939\u300C${label}\u300D */
+${css}
+`;
+}
+function markHiddenFolderNodes(root, folderName) {
+  var _a;
+  const name = (folderName || "").trim();
+  if (!name) return 0;
+  let matched = 0;
+  for (const el of Array.from(root.querySelectorAll("[data-path]"))) {
+    if (!matchesHiddenFolder((_a = el.getAttribute("data-path")) != null ? _a : "", name)) continue;
+    matched++;
+    el.classList.add(HIDDEN_FOLDER_CLASS);
+    if (el.querySelector("[data-path]")) continue;
+    const sibling = el.nextElementSibling;
+    if (!sibling || !/children/i.test(sibling.className)) continue;
+    sibling.classList.add(HIDDEN_FOLDER_CLASS);
+    const parent = el.parentElement;
+    if (parent && parent !== root && !parent.hasAttribute("data-path")) {
+      parent.classList.add(HIDDEN_FOLDER_CLASS);
+    }
+  }
+  return matched;
+}
+function clearHiddenFolderNodes(root = document) {
+  const marked = Array.from(root.querySelectorAll(`.${HIDDEN_FOLDER_CLASS}`));
+  for (const el of marked) el.classList.remove(HIDDEN_FOLDER_CLASS);
+  return marked.length;
+}
+
+// src/yuque/explorer-sync.ts
+var SYNCED_DOC_CLASS = "yuque-synced-doc";
+function syncedDocPaths(state) {
+  const out = /* @__PURE__ */ new Set();
+  for (const rec of Object.values(state)) {
+    if (rec == null ? void 0 : rec.path) out.add(`${rec.path}.md`);
+  }
+  return out;
+}
+function markSyncedDocNodes(root, synced) {
+  var _a;
+  let matched = 0;
+  for (const el of Array.from(root.querySelectorAll("[data-path]"))) {
+    const p = (_a = el.getAttribute("data-path")) != null ? _a : "";
+    if (!p.endsWith(".md")) continue;
+    if (synced.has(p)) {
+      el.classList.add(SYNCED_DOC_CLASS);
+      matched++;
+    } else {
+      el.classList.remove(SYNCED_DOC_CLASS);
+    }
+  }
+  return matched;
+}
+function clearSyncedDocNodes(root = document) {
+  const marked = Array.from(root.querySelectorAll(`.${SYNCED_DOC_CLASS}`));
+  for (const el of marked) el.classList.remove(SYNCED_DOC_CLASS);
+  return marked.length;
+}
+
+// src/settings.ts
+var OBSOLETE_SETTING_KEYS = [
+  /** v0.8.0 移除：文本格式动作已全部并入顶部工具栏（表格工具条改为按上下文自动出现） */
+  "toolbar",
+  /** v0.8.0 合并：顶部工具栏开着就带元信息，不再单独设开关 */
+  "topBarMeta",
+  /** v0.8.0 合并：阅读时长跟随「文档头信息」 */
+  "showReadingTime",
+  /** v0.6.5 移除：属性改为「显不显示」，旧的整体开关 */
+  "yuqueDocProperties",
+  /** v0.5.0 移除：自绘浮动目录，改用 Obsidian 原生大纲 */
+  "showOutline"
+];
+function summarizeTaskNames(names, max = 3) {
+  const list = names.filter((n) => !!n);
+  if (list.length === 0) return "\u8FD8\u6CA1\u6709\u4EFB\u52A1";
+  const shown = list.slice(0, max).join("\u3001");
+  return list.length > max ? `${shown} \u7B49 ${list.length} \u4E2A\u77E5\u8BC6\u5E93` : shown;
+}
+function loadSettingsWithMigration(loaded, defaults) {
+  const raw = loaded && typeof loaded === "object" && !Array.isArray(loaded) ? loaded : {};
+  const added = [];
+  const merged = { ...defaults };
+  for (const key of Object.keys(defaults)) {
+    if (!(key in raw)) {
+      added.push(key);
+      continue;
+    }
+    const value = raw[key];
+    if (value !== void 0 && value !== null) merged[key] = value;
+  }
+  const removed = [];
+  for (const key of Object.keys(raw)) {
+    if (OBSOLETE_SETTING_KEYS.includes(key)) {
+      removed.push(key);
+      continue;
+    }
+    if (!(key in defaults)) removed.push(key);
+  }
+  return { settings: merged, removed, added };
+}
+
+// src/settings-tab.ts
+var import_obsidian16 = require("obsidian");
+var advancedShown = false;
+var YuqueSettingTab = class extends import_obsidian16.PluginSettingTab {
+  constructor(plugin) {
+    super(plugin.app, plugin);
+    this.plugin = plugin;
+  }
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.addClass("yuque-settings");
+    const s = this.plugin.settings;
+    this.renderIntro(containerEl);
+    containerEl.createEl("h2", { text: "\u7F16\u8F91" });
+    this.toggle(
+      containerEl,
+      "\u9876\u90E8\u5DE5\u5177\u680F\u4E0E\u5143\u4FE1\u606F",
+      "\u6587\u6863\u9876\u90E8\u7684\u56FA\u5B9A\u5DE5\u5177\u680F\uFF08\u6EDA\u52A8\u65F6\u4FDD\u6301\u53EF\u89C1\uFF09\u4E0E\u5B83\u4E0B\u9762\u7684\u5143\u4FE1\u606F\u884C\uFF1B\u4EC5\u5728\u7F16\u8F91\u6A21\u5F0F\u663E\u793A",
+      s.topBar,
+      (v) => s.topBar = v
+    );
+    this.toggle(
+      containerEl,
+      "\u659C\u6760\u5FEB\u6377\u83DC\u5355",
+      '\u8F93\u5165 "/" \u5524\u8D77\u5757\u63D2\u5165\u83DC\u5355\uFF08\u6807\u9898 / \u5361\u7247 / \u5F85\u529E / \u8868\u683C\u2026\uFF09\uFF0C\u4E0E\u9876\u90E8\u300C\u63D2\u5165\u300D\u4E0B\u62C9\u540C\u4E00\u4EFD\u6761\u76EE',
+      s.slashMenu,
+      (v) => s.slashMenu = v
+    );
+    containerEl.createEl("h2", { text: "\u9605\u8BFB" });
+    this.toggle(
+      containerEl,
+      "\u9605\u8BFB\u589E\u5F3A",
+      "\u9605\u8BFB\u6A21\u5F0F\u4E0B\u542F\u7528\u6587\u6863\u5934\u4E0E\u8BED\u96C0\u5F0F\u6392\u7248\uFF08\u680F\u5BBD\u3001\u884C\u9AD8\u3001\u56FE\u7247\u5706\u89D2\u3001\u5BBD\u8868\u683C\u6A2A\u5411\u6EDA\u52A8\uFF09",
+      s.reader,
+      (v) => {
+        s.reader = v;
+        this.plugin.reader.refresh(true);
+      }
+    );
+    this.toggle(
+      containerEl,
+      "\u6587\u6863\u5934\u4FE1\u606F",
+      "\u6587\u6863\u9876\u90E8\u663E\u793A\u6807\u9898\u3001\u5B57\u6570\u3001\u9605\u8BFB\u65F6\u957F\u3001\u8BED\u96C0\u65F6\u95F4\u4E0E\u6807\u7B7E\uFF1B\u5173\u95ED\u540E\u7B14\u8BB0\u5C5E\u6027\u4E5F\u4E00\u5E76\u9690\u85CF",
+      s.showDocHeader,
+      (v) => {
+        s.showDocHeader = v;
+        this.plugin.reader.refresh(true);
+        this.display();
+      }
+    );
+    const effective = new Set(hiddenSlugsFor(s.showDocHeader, s.yuqueHiddenProps || []));
+    new import_obsidian16.Setting(containerEl).setName("\u7B14\u8BB0\u5C5E\u6027").setDesc(
+      s.showDocHeader ? "\u9009\u62E9\u8981\u9690\u85CF\uFF08\u6216\u6062\u590D\uFF09\u7684\u5C5E\u6027\uFF1B\u5C5E\u6027\u4ECD\u5199\u5728\u6587\u4EF6\u91CC\uFF0C\u4E0D\u5F71\u54CD\u8BFB\u53D6\u4E0E\u53CC\u94FE" : "\u300C\u6587\u6863\u5934\u4FE1\u606F\u300D\u5DF2\u5173\u95ED\uFF0C\u5C5E\u6027\u5F53\u524D\u5168\u90E8\u9690\u85CF"
+    ).addDropdown((d) => {
+      d.addOption("__summary__", `\u5F53\u524D\uFF1A\u9690\u85CF ${effective.size} / ${PROPERTY_TOGGLES.length} \u4E2A`);
+      d.addOption("__show_all__", "\u5168\u90E8\u663E\u793A");
+      d.addOption("__hide_all__", "\u5168\u90E8\u9690\u85CF");
+      for (const prop of PROPERTY_TOGGLES) {
+        const state = effective.has(prop.slug) ? "\u5DF2\u9690\u85CF" : "\u5DF2\u663E\u793A";
+        d.addOption(prop.slug, `${state}\uFF1A${prop.label}`);
+      }
+      d.setValue("__summary__").setDisabled(!s.showDocHeader);
+      d.onChange(async (v) => {
+        if (v === "__summary__") return;
+        const next = new Set(s.yuqueHiddenProps || []);
+        if (v === "__show_all__") next.clear();
+        else if (v === "__hide_all__") PROPERTY_TOGGLES.forEach((p) => next.add(p.slug));
+        else if (next.has(v)) next.delete(v);
+        else next.add(v);
+        s.yuqueHiddenProps = [...next];
+        await this.plugin.saveSettings();
+        this.display();
+      });
+    });
+    this.toggle(
+      containerEl,
+      "\u6807\u9898\u81EA\u52A8\u7F16\u53F7",
+      "\u6807\u9898\u663E\u793A\u5C42\u7EA7\u6570\u5B57\uFF081 / 1.1 / 1.1.1\uFF09\uFF1B\u6587\u6863\u81EA\u5E26\u7684\u7F16\u53F7\u4E0D\u53D7\u5F71\u54CD",
+      s.headingNumbers,
+      (v) => {
+        s.headingNumbers = v;
+        this.plugin.reader.refresh(true);
+      }
+    );
+    this.toggle(
+      containerEl,
+      "\u8DDF\u968F\u7A97\u53E3\u5BBD\u5EA6",
+      "\u6B63\u6587\u94FA\u6EE1\u53EF\u7528\u5BBD\u5EA6\uFF1B\u4F1A\u4E00\u5E76\u653E\u5F00 Obsidian \u81EA\u5E26\u300C\u53EF\u8BFB\u884C\u5BBD\u300D\u7684\u9650\u5236",
+      s.contentWidthAuto,
+      (v) => {
+        s.contentWidthAuto = v;
+        this.display();
+      }
+    );
+    new import_obsidian16.Setting(containerEl).setName("\u6B63\u6587\u680F\u5BBD").setDesc("\u9605\u8BFB\u4E0E\u5B9E\u65F6\u9884\u89C8\u4E0B\u7684\u6B63\u6587\u5BBD\u5EA6\uFF08\u50CF\u7D20\uFF09\uFF1B600-900 \u6700\u5229\u4E8E\u9605\u8BFB").addSlider((sl) => {
+      sl.setLimits(600, 1600, 20).setValue(s.contentWidth).setDynamicTooltip().setDisabled(s.contentWidthAuto).onChange(async (v) => {
+        s.contentWidth = v;
+        await this.plugin.saveSettings();
+      });
+    });
+    containerEl.createEl("h2", { text: "\u8BED\u96C0\u6587\u6863\u540C\u6B65" });
+    new import_obsidian16.Setting(containerEl).setName("\u8BED\u96C0 Token").setDesc("\u8BED\u96C0\u7F51\u9875\u300C\u8D26\u53F7\u8BBE\u7F6E \u2192 \u5F00\u53D1\u8005 \u2192 Token\u300D\uFF0C\u6743\u9650\u52FE\u300C\u8BFB\u53D6\u77E5\u8BC6\u5E93\u3001\u6587\u6863\u300D").addText((t) => {
+      t.inputEl.type = "password";
+      t.setPlaceholder("\u586B\u5165\u8BED\u96C0 Token").setValue(s.yuqueToken).onChange(async (v) => {
+        s.yuqueToken = v.trim();
+        await this.plugin.saveSettings();
+      });
+    }).addButton(
+      (b) => b.setButtonText("\u6D4B\u8BD5\u8FDE\u63A5").onClick(async () => {
+        var _a, _b;
+        if (!s.yuqueToken) {
+          new import_obsidian16.Notice("\u8BF7\u5148\u586B\u5199 Token");
+          return;
+        }
+        b.setDisabled(true);
+        try {
+          const user = await this.plugin.createApi().getUser();
+          new import_obsidian16.Notice(`\u8FDE\u63A5\u6210\u529F\uFF1A${(_b = (_a = user == null ? void 0 : user.name) != null ? _a : user == null ? void 0 : user.login) != null ? _b : "\u5DF2\u8BA4\u8BC1"}`);
+        } catch (e) {
+          new import_obsidian16.Notice(`\u8FDE\u63A5\u5931\u8D25\uFF1A${e.message}`);
+        } finally {
+          b.setDisabled(false);
+        }
+      })
+    );
+    const taskNames = (s.yuqueTasks || []).map((t) => t.repoName);
+    new import_obsidian16.Setting(containerEl).setName(`\u540C\u6B65\u4EFB\u52A1\uFF08${taskNames.length}\uFF09`).setDesc(
+      taskNames.length === 0 ? "\u8FD8\u6CA1\u6709\u4EFB\u52A1\uFF1A\u6DFB\u52A0\u540E\u6309\u8BED\u96C0\u66F4\u65B0\u65F6\u95F4\u589E\u91CF\u540C\u6B65" : `${summarizeTaskNames(taskNames)}\uFF1B\u53EF\u5355\u72EC\u540C\u6B65\u6216\u5220\u9664`
+    ).addButton(
+      (b) => b.setButtonText("\u7BA1\u7406\u4EFB\u52A1").onClick(() => manageTasksFlow(this.plugin))
+    ).addButton(
+      (b) => b.setButtonText("\u6DFB\u52A0\u4EFB\u52A1").setCta().onClick(() => {
+        void addSyncTaskFlow(this.plugin);
+      })
+    );
+    this.toggle(
+      containerEl,
+      "\u542F\u52A8\u65F6\u81EA\u52A8\u540C\u6B65",
+      "Obsidian \u542F\u52A8 15 \u79D2\u540E\u81EA\u52A8\u6267\u884C\u4E00\u6B21\u300C\u540C\u6B65\u5168\u90E8\u4EFB\u52A1\u300D\uFF08\u589E\u91CF\uFF0C\u53EA\u62C9\u6709\u6539\u52A8\u7684\u6587\u6863\uFF09\uFF1B\u914D\u989D\u4E0D\u8DB3\u65F6\u4F1A\u5728\u4EFB\u52A1\u8FB9\u754C\u505C\u4E0B",
+      s.yuqueAutoSyncOnStart,
+      (v) => s.yuqueAutoSyncOnStart = v
+    );
+    this.toggle(
+      containerEl,
+      "\u56FE\u7247\u672C\u5730\u5316",
+      "\u628A\u8BED\u96C0 CDN \u56FE\u7247\u4E0B\u8F7D\u5230\u4ED3\u5E93\u5185\uFF0C\u907F\u514D\u5916\u94FE\u5931\u6548",
+      s.yuqueDownloadImages,
+      (v) => s.yuqueDownloadImages = v
+    );
+    this.toggle(
+      containerEl,
+      "\u5728\u6587\u4EF6\u6D4F\u89C8\u5668\u4E2D\u9690\u85CF\u56FE\u7247\u6587\u4EF6\u5939",
+      "\u53EA\u5728\u6587\u4EF6\u6D4F\u89C8\u5668\u91CC\u9690\u53BB\u8BE5\u76EE\u5F55\uFF1B\u6B63\u6587\u56FE\u7247\u5F15\u7528\u4E0E\u663E\u793A\u5B8C\u5168\u4E0D\u53D8\uFF08\u641C\u7D22\u4ECD\u80FD\u547D\u4E2D\u5B83\uFF09",
+      s.yuqueHideAssetsFolder,
+      (v) => s.yuqueHideAssetsFolder = v
+    );
+    this.toggle(
+      containerEl,
+      "\u5728\u6587\u4EF6\u6D4F\u89C8\u5668\u4E2D\u6807\u8BB0\u8BED\u96C0\u6587\u6863",
+      "\u540C\u6B65\u6587\u6863\u7684\u884C\u5C3E\u663E\u793A\u4E00\u4E2A\u5C0F\u5706\u70B9\uFF0C\u626B\u4E00\u773C\u76EE\u5F55\u5373\u77E5\u54EA\u4E9B\u5185\u5BB9\u6765\u81EA\u8BED\u96C0",
+      s.yuqueMarkSyncedDocs,
+      (v) => s.yuqueMarkSyncedDocs = v
+    );
+    new import_obsidian16.Setting(containerEl).setName("\u663E\u793A\u9AD8\u7EA7\u8BBE\u7F6E").setDesc("\u56FE\u7247\u76EE\u5F55\u540D\u3001\u6587\u5B57\u989C\u8272\u3001\u51B2\u7A81\u5907\u4EFD\u3001\u540C\u6B65\u8BF7\u6C42\u4E0A\u9650\u3001\u6E05\u9664\u589E\u91CF\u8BB0\u5F55\u7B49\u4F4E\u9891\u9879").addToggle(
+      (t) => t.setValue(advancedShown).onChange((v) => {
+        advancedShown = v;
+        this.display();
+      })
+    );
+    if (!advancedShown) return;
+    new import_obsidian16.Setting(containerEl).setName("\u56FE\u7247\u5B58\u653E\u6587\u4EF6\u5939").setDesc("\u4F4D\u4E8E\u6BCF\u4E2A\u540C\u6B65\u4EFB\u52A1\u7684\u76EE\u6807\u6587\u4EF6\u5939\u4E4B\u4E0B").addText(
+      (t) => t.setPlaceholder("assets").setValue(s.yuqueAssetsFolder).onChange(async (v) => {
+        s.yuqueAssetsFolder = v.trim() || "assets";
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian16.Setting(containerEl).setName("\u6587\u5B57\u989C\u8272").setDesc(
+      "\u540C\u6B65\u65F6\u8BED\u96C0\u5F69\u8272\u6587\u5B57\u600E\u4E48\u843D\u76D8\u3002\u300C\u4FDD\u7559\u989C\u8272\u300D\u5728\u7F16\u8F91\u6A21\u5F0F\u4E0B\u4F1A\u770B\u5230 span \u6E90\u7801\uFF1B\u5B58\u91CF\u6587\u6863\u7684\u65E7\u6807\u8BB0\u7528\u547D\u4EE4\u300C\u6E05\u7406\u6587\u5B57\u989C\u8272\u6807\u8BB0\u300D\u5904\u7406"
+    ).addDropdown((d) => {
+      d.addOption("drop", "\u4E0D\u8F93\u51FA\u989C\u8272\uFF08\u7EAF\u6587\u672C\uFF09");
+      d.addOption("highlight", "\u8F6C\u4E3A\u9AD8\u4EAE ==\u6587\u5B57==");
+      d.addOption("keep", "\u4FDD\u7559\u989C\u8272\uFF08\u4EC5\u9605\u8BFB\u6A21\u5F0F\u6E32\u67D3\uFF09");
+      d.setValue(s.yuqueTextColor || "drop").onChange(async (v) => {
+        s.yuqueTextColor = v;
+        await this.plugin.saveSettings();
+      });
+    });
+    this.toggle(
+      containerEl,
+      "\u672C\u5730\u6539\u52A8\u51B2\u7A81\u65F6\u5907\u4EFD",
+      "\u8986\u76D6\u524D\u82E5\u68C0\u6D4B\u5230\u6587\u4EF6\u5DF2\u88AB\u672C\u5730\u4FEE\u6539\uFF0C\u5148\u5907\u4EFD\u5230 .yuque-backups/\uFF08\u6BCF\u7BC7\u4FDD\u7559\u6700\u8FD1 5 \u4EFD\uFF09",
+      s.yuqueBackupOnConflict,
+      (v) => s.yuqueBackupOnConflict = v
+    );
+    const suggested = suggestBudget(s.yuqueRateLog);
+    new import_obsidian16.Setting(containerEl).setName("\u6BCF\u6B21\u540C\u6B65\u8BF7\u6C42\u4E0A\u9650").setDesc(
+      "0 = \u81EA\u52A8\uFF1A\u80FD\u8BFB\u5230 X-RateLimit-Remaining \u5C31\u6309\u5269\u4F59\u989D\u5EA6\u8D70\uFF0C\u8BFB\u4E0D\u5230\u5C31\u4E0D\u9650\uFF08\u53EA\u4FDD\u7559 429 \u7194\u65AD\uFF09\u3002\u4E0A\u9650\u53EA\u5728\u4EFB\u52A1\u8FB9\u754C\u751F\u6548\u2014\u2014\u4E0D\u4F1A\u628A\u67D0\u4E2A\u5E93\u62C9\u4E00\u534A\uFF0C\u4E0B\u6B21\u6267\u884C\u63A5\u7740\u8DD1\u3002" + (suggested === null ? "\u672C\u673A\u8FD8\u6CA1\u649E\u5230\u8FC7 429\uFF0C\u6682\u65E0\u5EFA\u8BAE\u503C\uFF08\u6267\u884C\u4E00\u6B21\u300C\u8BED\u96C0\u540C\u6B65\uFF1A\u8BCA\u65AD\u300D\u53EF\u67E5\u770B\u89C2\u6D4B\u8BB0\u5F55\uFF09" : `\u672C\u673A\u89C2\u6D4B\u95E8\u69DB ${s.yuqueRateLog.minCeiling} \u6B21\uFF0C\u5EFA\u8BAE\u586B ${suggested}\uFF08\xD70.8\uFF09`)
+    ).addText(
+      (t) => t.setPlaceholder("0").setValue(String(s.yuqueRequestBudget || 0)).onChange(async (v) => {
+        const n = Number.parseInt(v.trim(), 10);
+        s.yuqueRequestBudget = Number.isFinite(n) && n > 0 ? n : 0;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian16.Setting(containerEl).setName("\u6E05\u9664\u589E\u91CF\u540C\u6B65\u8BB0\u5F55").setDesc("\u4E0B\u6B21\u540C\u6B65\u5F3A\u5236\u91CD\u65B0\u62C9\u53D6\u5168\u90E8\u6587\u6863\uFF08\u672C\u5730\u6587\u4EF6\u4E0D\u4F1A\u88AB\u5220\u9664\uFF09").addButton(
+      (b) => b.setButtonText("\u6E05\u9664").onClick(async () => {
+        s.yuqueSyncState = {};
+        await this.plugin.saveSettings();
+        new import_obsidian16.Notice("\u5DF2\u6E05\u9664\u540C\u6B65\u8BB0\u5F55\uFF0C\u4E0B\u6B21\u5C06\u5168\u91CF\u62C9\u53D6");
+      })
+    );
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "\u5176\u5B83\u7EF4\u62A4\u547D\u4EE4\u5728\u547D\u4EE4\u9762\u677F\u300C\u8BED\u96C0\u540C\u6B65\uFF1A\u2026\u300D\u4E0B\uFF1A\u8BCA\u65AD\uFF08\u6392\u67E5\u62C9\u53D6\u4E3A\u7A7A\uFF09\u3001\u91CD\u5EFA\u5185\u90E8\u94FE\u63A5\u3001\u8865\u9F50\u6587\u6863\u5C5E\u6027\u3001\u6E05\u7406\u6587\u5B57\u989C\u8272\u6807\u8BB0\u2014\u2014\u90FD\u4E0D\u9700\u8981\u6539\u8BBE\u7F6E\uFF0C\u6545\u4E0D\u5728\u6B64\u5217\u3002"
+    });
+  }
+  /**
+   * 插件简介。
+   * 放在最上面而不是塞进 README：设置页是用户唯一一定会打开的页面，
+   * 「这插件是干什么的、有哪几块能力」应该在这里一眼看完。
+   */
+  renderIntro(el) {
+    const card = el.createDiv({ cls: "yuque-settings-intro" });
+    const head = card.createDiv({ cls: "yuque-settings-intro-head" });
+    head.createEl("strong", { text: "Yuque Style" });
+    head.createSpan({ cls: "yuque-settings-version", text: `v${this.plugin.manifest.version}` });
+    card.createEl("p", {
+      cls: "yuque-settings-intro-desc",
+      text: "\u628A\u8BED\u96C0\u7684\u5199\u4F5C\u4E0E\u9605\u8BFB\u4F53\u9A8C\u642C\u8FDB Obsidian\uFF0C\u5E76\u628A\u8BED\u96C0\u77E5\u8BC6\u5E93\u540C\u6B65\u5230\u672C\u5730\uFF08\u5355\u5411\u53EA\u8BFB\uFF0C\u4E0D\u4F1A\u56DE\u5199\u8BED\u96C0\uFF09\u3002"
+    });
+    const ul = card.createEl("ul", { cls: "yuque-settings-intro-list" });
+    ul.createEl("li", {
+      text: "\u7F16\u8F91\uFF1A\u6587\u6863\u9876\u90E8\u56FA\u5B9A\u5DE5\u5177\u680F\uFF08\u6BB5\u843D\u6837\u5F0F / \u683C\u5F0F / \u5217\u8868 / \u5F15\u7528 / \u4EE3\u7801\u5757 / \u63D2\u5165\u5757\uFF09\u4E0E\u5143\u4FE1\u606F\u884C"
+    });
+    ul.createEl("li", {
+      text: "\u9605\u8BFB\uFF1A\u8BED\u96C0\u5F0F\u6392\u7248\u2014\u2014\u5C45\u4E2D\u680F\u5BBD\u3001\u884C\u9AD8\u4E0E\u6BB5\u8DDD\u3001\u56FE\u7247\u5706\u89D2\u9650\u9AD8\u3001\u5BBD\u8868\u683C\u6A2A\u5411\u6EDA\u52A8\u3001\u6807\u9898\u81EA\u52A8\u7F16\u53F7"
+    });
+    ul.createEl("li", {
+      text: "\u540C\u6B65\uFF1A\u8FD8\u539F\u77E5\u8BC6\u5E93\u76EE\u5F55\u7ED3\u6784\u3001\u56FE\u7247\u672C\u5730\u5316\u3001\u6587\u6863\u95F4\u81EA\u52A8\u53CC\u94FE\uFF1B\u589E\u91CF\u540C\u6B65\uFF0C\u8986\u76D6\u524D\u5148\u5907\u4EFD\u672C\u5730\u6539\u52A8"
+    });
+  }
+  /**
+   * 统一的开关项。
+   * 收成一个方法是为了别让每项都重复一遍「取设置 → 存设置」的样板，
+   * 顺便把描述压短——设置页里最长的说明原本有四行，读起来像文档而不像开关。
+   */
+  toggle(parent, name, desc, value, onSet) {
+    return new import_obsidian16.Setting(parent).setName(name).setDesc(desc).addToggle(
+      (t) => t.setValue(value).onChange(async (v) => {
+        onSet(v);
+        await this.plugin.saveSettings();
+      })
+    );
+  }
+};
+
 // src/main.ts
 var DEFAULT_SETTINGS = {
-  toolbar: true,
+  topBar: true,
   slashMenu: true,
   reader: true,
   showDocHeader: true,
-  showReadingTime: true,
   contentWidth: 820,
   contentWidthAuto: false,
   headingNumbers: true,
   yuqueToken: "",
   yuqueTasks: [],
+  yuqueAutoSyncOnStart: false,
   yuqueDownloadImages: true,
   yuqueAssetsFolder: "assets",
+  yuqueHideAssetsFolder: true,
+  yuqueMarkSyncedDocs: true,
   yuqueHiddenProps: [],
   // 默认不输出颜色：Obsidian 实时预览不渲染内联 HTML，输出 span 只会在编辑模式下露出源码
   yuqueTextColor: "drop",
   yuqueBackupOnConflict: true,
+  // 默认「自动」而不是某个数字：语雀的额度不透明（官方称 5000/小时且返回 X-RateLimit-*，
+  // 但实测 429 上见不到该头），拿官方数字当预算等于用一把没量过自己的尺子限速
+  yuqueRequestBudget: 0,
+  yuqueRateLog: emptyRateLog(),
   yuqueSyncState: {}
 };
 var HIDDEN_PROPS_STYLE_ID = "yuque-hidden-properties";
-var YuqueStylePlugin = class extends import_obsidian9.Plugin {
+var HIDDEN_FOLDERS_STYLE_ID = "yuque-hidden-folders";
+var AUTO_SYNC_DELAY_MS = 15e3;
+var RATE_SAVE_INTERVAL_MS = 2e3;
+var YuqueStylePlugin = class extends import_obsidian17.Plugin {
   constructor() {
     super(...arguments);
     this.settings = { ...DEFAULT_SETTINGS };
+    /** 已挂上观察器的文件浏览器视图根节点（避免重复 observe） */
+    this.observedExplorers = /* @__PURE__ */ new WeakSet();
+    this.explorerScanTimer = null;
+    /** 上次报告的命中条目数，用于「只在变化时打一行日志」 */
+    this.hiddenFolderHits = -1;
+    /** 上次报告的同步文档标记数（同上，只在变化时打日志） */
+    this.syncedDocHits = -1;
+    /** 配额观测量落盘的节流计时器 */
+    this.rateSaveTimer = null;
   }
   async onload() {
     await this.loadSettings();
     console.log(`[yuque-style] loaded v${this.manifest.version}`);
-    this.registerEditorExtension(buildYuqueToolbar(() => this.settings.toolbar, this.app));
+    this.register(() => {
+      if (this.rateSaveTimer !== null) {
+        window.clearTimeout(this.rateSaveTimer);
+        this.rateSaveTimer = null;
+        void this.persistRateLog();
+      }
+    });
+    this.registerEditorExtension(buildTableToolbar());
     this.registerEditorSuggest(new YuqueSlashSuggest(this));
+    registerEditorCommands(this);
     this.reader = new ReaderEnhancer(this);
     this.reader.register();
+    this.topBars = new TopBarManager(this);
+    this.topBars.register();
     this.applyCssVars();
     this.applyPropertyVisibility();
+    this.applyHiddenFolder();
+    this.registerExplorerObserver();
     this.addSettingTab(new YuqueSettingTab(this));
     this.addCommand({
       id: "insert-callout",
@@ -3429,7 +5171,7 @@ var YuqueStylePlugin = class extends import_obsidian9.Plugin {
         this.settings.reader = !this.settings.reader;
         await this.saveSettings();
         this.reader.refresh(true);
-        new import_obsidian9.Notice(this.settings.reader ? "\u9605\u8BFB\u589E\u5F3A\u5DF2\u5F00\u542F" : "\u9605\u8BFB\u589E\u5F3A\u5DF2\u5173\u95ED");
+        new import_obsidian17.Notice(this.settings.reader ? "\u9605\u8BFB\u589E\u5F3A\u5DF2\u5F00\u542F" : "\u9605\u8BFB\u589E\u5F3A\u5DF2\u5173\u95ED");
       }
     });
     this.addRibbonIcon("refresh-cw", "\u540C\u6B65\u8BED\u96C0\u6587\u6863", () => syncAllFlow(this));
@@ -3442,6 +5184,11 @@ var YuqueStylePlugin = class extends import_obsidian9.Plugin {
       id: "yuque-sync-add",
       name: "\u8BED\u96C0\u540C\u6B65\uFF1A\u6DFB\u52A0/\u66F4\u65B0\u540C\u6B65\u4EFB\u52A1\uFF08\u9009\u77E5\u8BC6\u5E93\u3001\u6587\u6863\u4E0E\u76EE\u6807\u8DEF\u5F84\uFF09",
       callback: () => addSyncTaskFlow(this)
+    });
+    this.addCommand({
+      id: "yuque-sync-manage",
+      name: "\u8BED\u96C0\u540C\u6B65\uFF1A\u7BA1\u7406\u540C\u6B65\u4EFB\u52A1\uFF08\u5355\u72EC\u540C\u6B65 / \u5220\u9664\uFF09",
+      callback: () => manageTasksFlow(this)
     });
     this.addCommand({
       id: "yuque-diagnose",
@@ -3463,28 +5210,55 @@ var YuqueStylePlugin = class extends import_obsidian9.Plugin {
       name: "\u8BED\u96C0\u540C\u6B65\uFF1A\u8865\u9F50\u6587\u6863\u5C5E\u6027\uFF08\u5E76\u628A\u65E7\u952E\u540D\u8FC1\u79FB\u4E3A\u4E2D\u6587\uFF09",
       callback: () => backfillFlow(this)
     });
+    this.addCommand({
+      id: "yuque-clean-orphans",
+      name: "\u8BED\u96C0\u540C\u6B65\uFF1A\u6E05\u7406\u5B64\u513F\u6587\u6863\u526F\u672C\uFF08\u8BED\u96C0\u7AEF\u5DF2\u5220\u9664\u7684\u6587\u6863\uFF0C\u79FB\u5165\u56DE\u6536\u7AD9\uFF09",
+      callback: () => orphanCleanupFlow(this)
+    });
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         this.handleRename(file, oldPath);
       })
     );
+    this.scheduleAutoSync();
+  }
+  /**
+   * 启动自动同步（yuqueAutoSyncOnStart）：延迟触发一次「立即同步全部任务」。
+   * 复用 syncAllFlow 的弹窗、停止按钮与既有的预算/熔断兜底，不另起一套静默通道——
+   * 自动触发的同步更需要让用户看得见它正在消耗配额。
+   * 无 Token 或无任务时静默跳过：条件不满足不是故障，弹窗提示只会添乱。
+   */
+  scheduleAutoSync() {
+    if (!this.settings.yuqueAutoSyncOnStart) return;
+    if (!this.settings.yuqueToken || this.settings.yuqueTasks.length === 0) return;
+    const timer = window.setTimeout(() => {
+      if (!this.settings.yuqueAutoSyncOnStart) return;
+      console.log("[yuque-style] \u542F\u52A8\u81EA\u52A8\u540C\u6B65\u5F00\u59CB");
+      void syncAllFlow(this);
+    }, AUTO_SYNC_DELAY_MS);
+    this.register(() => window.clearTimeout(timer));
   }
   /** 文件被重命名或移动时，同步更新同步记录里的本地路径 */
   handleRename(file, oldPath) {
     if (!file || !oldPath) return;
     const state = this.settings.yuqueSyncState;
     if (!state) return;
-    if (applyRename(state, oldPath, file.path, file instanceof import_obsidian9.TFolder).length === 0) return;
+    if (applyRename(state, oldPath, file.path, file instanceof import_obsidian17.TFolder).length === 0) return;
     void this.saveSettings();
   }
   onunload() {
-    var _a;
+    var _a, _b, _c, _d;
     document.querySelectorAll(".yuque-doc-header").forEach((n) => n.remove());
     document.querySelectorAll(".yuque-reader").forEach((n) => n.classList.remove("yuque-reader"));
     document.documentElement.style.removeProperty("--yuque-content-width");
     document.body.classList.remove("yuque-width-auto");
     document.body.classList.remove("yuque-hide-all-props");
     (_a = document.getElementById(HIDDEN_PROPS_STYLE_ID)) == null ? void 0 : _a.remove();
+    (_b = document.getElementById(HIDDEN_FOLDERS_STYLE_ID)) == null ? void 0 : _b.remove();
+    (_c = this.explorerObserver) == null ? void 0 : _c.disconnect();
+    clearHiddenFolderNodes();
+    clearSyncedDocNodes();
+    (_d = this.topBars) == null ? void 0 : _d.destroyAll();
   }
   /**
    * 把「笔记属性」的隐藏规则写进一个 <style>。
@@ -3509,6 +5283,98 @@ var YuqueStylePlugin = class extends import_obsidian9.Plugin {
     }
     el.textContent = css;
   }
+  /**
+   * 把「隐藏图片文件夹」的规则写进一个 <style>。
+   *
+   * 只隐藏文件浏览器里的条目，**不动仓库结构**：图片引用走 vault 路径解析，
+   * 隐藏与否都不影响正文里的 `![[assets/x.png]]` 显示。用 CSS 而不是真的把目录移走，
+   * 是因为「移走」会连带改写所有正文里的图片路径，代价与风险都不成比例。
+   */
+  applyHiddenFolder() {
+    clearHiddenFolderNodes();
+    const css = this.settings.yuqueHideAssetsFolder ? buildHiddenFolderCss(this.settings.yuqueAssetsFolder) : "";
+    let el = document.getElementById(HIDDEN_FOLDERS_STYLE_ID);
+    if (!css) {
+      el == null ? void 0 : el.remove();
+      return;
+    }
+    if (!el) {
+      el = document.createElement("style");
+      el.id = HIDDEN_FOLDERS_STYLE_ID;
+      document.head.appendChild(el);
+    }
+    el.textContent = css;
+    this.hiddenFolderHits = -1;
+    this.markHiddenFolders();
+  }
+  /** 当前所有文件浏览器视图的根节点（桌面侧栏 / 浮窗 / 移动端抽屉都算） */
+  explorerRoots() {
+    return this.app.workspace.getLeavesOfType("file-explorer").map((leaf) => {
+      var _a;
+      return (_a = leaf.view) == null ? void 0 : _a.containerEl;
+    }).filter((el) => !!el);
+  }
+  /**
+   * 文件浏览器的展开 / 刷新是纯 DOM 变更，没有可挂的事件，只能用 MutationObserver 兜住。
+   * 观察器挂在**视图根节点**而不是整个 body：编辑器里每敲一个字都会改 DOM，
+   * 挂在 body 上等于让扫描跟着输入跑。
+   */
+  registerExplorerObserver() {
+    this.explorerObserver = new MutationObserver(() => this.scheduleHiddenFolderScan());
+    this.register(() => {
+      var _a;
+      (_a = this.explorerObserver) == null ? void 0 : _a.disconnect();
+      if (this.explorerScanTimer !== null) window.clearTimeout(this.explorerScanTimer);
+    });
+    this.registerEvent(this.app.workspace.on("layout-change", () => this.attachExplorerObserver()));
+    this.attachExplorerObserver();
+  }
+  attachExplorerObserver() {
+    var _a;
+    for (const el of this.explorerRoots()) {
+      if (this.observedExplorers.has(el)) continue;
+      this.observedExplorers.add(el);
+      (_a = this.explorerObserver) == null ? void 0 : _a.observe(el, { childList: true, subtree: true });
+    }
+    this.scheduleHiddenFolderScan();
+  }
+  /** 防抖：展开一整棵目录树会连打几十次变更，攒一次扫描就够 */
+  scheduleHiddenFolderScan() {
+    if (this.explorerScanTimer !== null) window.clearTimeout(this.explorerScanTimer);
+    this.explorerScanTimer = window.setTimeout(() => {
+      this.explorerScanTimer = null;
+      this.markHiddenFolders();
+      this.markSyncedDocs();
+    }, 120);
+  }
+  /**
+   * 给文件浏览器里的图片文件夹条目打标记（CSS 类的规则在注入的 <style> 里）。
+   * 命中数变化时打一行日志——远程排查「隐藏没生效」时，先看这行有没有出现：
+   * 命中 0 说明 DOM 里没找到 `data-path` 匹配的条目，即选择器/结构对不上。
+   */
+  markHiddenFolders() {
+    if (!this.settings.yuqueHideAssetsFolder) return;
+    const name = this.settings.yuqueAssetsFolder;
+    let hits = 0;
+    for (const el of this.explorerRoots()) hits += markHiddenFolderNodes(el, name);
+    if (hits !== this.hiddenFolderHits) {
+      this.hiddenFolderHits = hits;
+      console.log(`[yuque-style] \u6587\u4EF6\u6D4F\u89C8\u5668\u4E2D\u547D\u4E2D ${hits} \u4E2A\u300C${name}\u300D\u6761\u76EE\uFF08\u5DF2\u9690\u85CF\uFF09`);
+    }
+  }
+  /**
+   * 给文件浏览器里的语雀同步文档打标记（圆点样式在 styles.css）。
+   * 关掉开关时传空集合——markSyncedDocNodes 会顺带摘掉旧标记，不留幽灵圆点。
+   */
+  markSyncedDocs() {
+    const synced = this.settings.yuqueMarkSyncedDocs ? syncedDocPaths(this.settings.yuqueSyncState || {}) : /* @__PURE__ */ new Set();
+    let hits = 0;
+    for (const el of this.explorerRoots()) hits += markSyncedDocNodes(el, synced);
+    if (hits !== this.syncedDocHits) {
+      this.syncedDocHits = hits;
+      console.log(`[yuque-style] \u6587\u4EF6\u6D4F\u89C8\u5668\u4E2D\u6807\u8BB0 ${hits} \u7BC7\u8BED\u96C0\u540C\u6B65\u6587\u6863`);
+    }
+  }
   applyCssVars() {
     document.documentElement.style.setProperty(
       "--yuque-content-width",
@@ -3518,199 +5384,49 @@ var YuqueStylePlugin = class extends import_obsidian9.Plugin {
   }
   async loadSettings() {
     const loaded = await this.loadData();
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
+    const { settings, removed } = loadSettingsWithMigration(loaded, DEFAULT_SETTINGS);
+    this.settings = settings;
     this.settings.yuqueSyncState = migrateSyncState(this.settings.yuqueSyncState);
+    this.settings.yuqueRateLog = migrateRateLog(this.settings.yuqueRateLog);
+    if (removed.length > 0) {
+      await this.saveData(this.settings);
+      console.log(`[yuque-style] \u5DF2\u6E05\u7406\u5E9F\u5F03\u914D\u7F6E\u9879\uFF1A${removed.join("\u3001")}`);
+    }
+  }
+  /**
+   * 统一的 API 构造入口：把观测回调注进去，于是每次请求都会进「本小时请求数」与
+   * 429 时间线。散在各处的 `new YuqueApi(...)` 一律改走这里，别再各自造一个。
+   */
+  createApi() {
+    return new YuqueApi(this.settings.yuqueToken, (info) => this.recordRate(info));
+  }
+  /**
+   * 配额观测记账（见 yuque/rate.ts）。每次请求都会调用，所以落盘必须节流：
+   * 429 立即落盘（这类事件必须活过重启），其余最多每 2 秒写一次。
+   */
+  recordRate(info) {
+    recordResponse(this.settings.yuqueRateLog, info);
+    if (info.status === 429) {
+      void this.persistRateLog();
+      return;
+    }
+    if (this.rateSaveTimer !== null) return;
+    this.rateSaveTimer = window.setTimeout(() => {
+      this.rateSaveTimer = null;
+      void this.persistRateLog();
+    }, RATE_SAVE_INTERVAL_MS);
+  }
+  /** 只写 data.json：saveSettings 会连带重算 CSS 与顶栏，同步途中每两秒刷一遍既无必要也浪费 */
+  async persistRateLog() {
+    await this.saveData(this.settings);
   }
   async saveSettings() {
+    var _a;
     await this.saveData(this.settings);
     this.applyCssVars();
     this.applyPropertyVisibility();
-  }
-};
-var YuqueSettingTab = class extends import_obsidian9.PluginSettingTab {
-  constructor(plugin) {
-    super(plugin.app, plugin);
-    this.plugin = plugin;
-  }
-  display() {
-    const { containerEl } = this;
-    containerEl.empty();
-    const s = this.plugin.settings;
-    containerEl.createEl("h2", { text: "\u8BED\u96C0\u98CE\u683C\u7F16\u8F91\u4E0E\u9605\u8BFB" });
-    new import_obsidian9.Setting(containerEl).setName("\u60AC\u6D6E\u683C\u5F0F\u5DE5\u5177\u680F").setDesc("\u7F16\u8F91\u5668\u4E2D\u9009\u4E2D\u6587\u672C\u65F6\uFF0C\u5728\u9009\u533A\u4E0A\u65B9\u5F39\u51FA\u8BED\u96C0\u5F0F\u683C\u5F0F\u5DE5\u5177\u680F").addToggle(
-      (t) => t.setValue(s.toolbar).onChange(async (v) => {
-        s.toolbar = v;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian9.Setting(containerEl).setName("\u659C\u6760\u5FEB\u6377\u83DC\u5355").setDesc('\u7F16\u8F91\u65F6\u8F93\u5165 "/" \u5F39\u51FA\u8BED\u96C0\u5F0F\u5757\u63D2\u5165\u83DC\u5355\uFF08\u6807\u9898 / \u5361\u7247 / \u5F85\u529E / \u8868\u683C\u7B49\uFF09').addToggle(
-      (t) => t.setValue(s.slashMenu).onChange(async (v) => {
-        s.slashMenu = v;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian9.Setting(containerEl).setName("\u9605\u8BFB\u589E\u5F3A").setDesc("\u9605\u8BFB\u6A21\u5F0F\u4E0B\u542F\u7528\u6587\u6863\u5934\u4E0E\u8BED\u96C0\u5F0F\u6392\u7248").addToggle(
-      (t) => t.setValue(s.reader).onChange(async (v) => {
-        s.reader = v;
-        await this.plugin.saveSettings();
-        this.plugin.reader.refresh(true);
-      })
-    );
-    new import_obsidian9.Setting(containerEl).setName("\u6587\u6863\u5934\u4FE1\u606F").setDesc(
-      "\u5728\u6587\u6863\u9876\u90E8\u5C55\u793A\u6807\u9898\u3001\u5B57\u6570\u3001\u9605\u8BFB\u65F6\u957F\u3001\u521B\u5EFA\u65E5\u671F\u4E0E\u6807\u7B7E\uFF1B\u5173\u95ED\u540E\u8FDE\u4E0B\u9762\u7684\u7B14\u8BB0\u5C5E\u6027\u4E5F\u4E00\u8D77\u9690\u85CF\uFF08\u603B\u5F00\u5173\uFF09"
-    ).addToggle(
-      (t) => t.setValue(s.showDocHeader).onChange(async (v) => {
-        s.showDocHeader = v;
-        await this.plugin.saveSettings();
-        this.plugin.reader.refresh(true);
-        this.display();
-      })
-    );
-    const effective = new Set(hiddenSlugsFor(s.showDocHeader, s.yuqueHiddenProps || []));
-    new import_obsidian9.Setting(containerEl).setName("\u7B14\u8BB0\u5C5E\u6027").setDesc(
-      s.showDocHeader ? "\u70B9\u5F00\u9009\u62E9\u8981\u9690\u85CF\uFF08\u6216\u6062\u590D\uFF09\u7684\u5C5E\u6027\uFF1A\u5C5E\u6027\u4ECD\u5199\u5728\u6587\u4EF6\u91CC\uFF0C\u4E0D\u5F71\u54CD\u8BFB\u53D6\u3001\u53CC\u94FE\u4E0E\u5176\u5B83\u63D2\u4EF6\uFF1B\u5168\u90E8\u9690\u85CF\u65F6\u6587\u6863\u9876\u90E8\u7684\u5C5E\u6027\u9762\u677F\u4F1A\u6574\u5757\u6536\u8D77" : "\u300C\u6587\u6863\u5934\u4FE1\u606F\u300D\u5DF2\u5173\u95ED\uFF0C\u7B14\u8BB0\u5C5E\u6027\u5F53\u524D\u5168\u90E8\u9690\u85CF\uFF1B\u6253\u5F00\u4E0A\u9762\u7684\u603B\u5F00\u5173\u540E\u518D\u5355\u72EC\u8C03\u6574"
-    ).addDropdown((d) => {
-      d.addOption("__summary__", `\u5F53\u524D\uFF1A\u9690\u85CF ${effective.size} / ${PROPERTY_TOGGLES.length} \u4E2A`);
-      d.addOption("__show_all__", "\u5168\u90E8\u663E\u793A");
-      d.addOption("__hide_all__", "\u5168\u90E8\u9690\u85CF");
-      for (const prop of PROPERTY_TOGGLES) {
-        const state = effective.has(prop.slug) ? "\u5DF2\u9690\u85CF" : "\u5DF2\u663E\u793A";
-        d.addOption(prop.slug, `${state}\uFF1A${prop.label}`);
-      }
-      d.setValue("__summary__").setDisabled(!s.showDocHeader);
-      d.onChange(async (v) => {
-        if (v === "__summary__") return;
-        const next = new Set(s.yuqueHiddenProps || []);
-        if (v === "__show_all__") next.clear();
-        else if (v === "__hide_all__") PROPERTY_TOGGLES.forEach((p) => next.add(p.slug));
-        else if (next.has(v)) next.delete(v);
-        else next.add(v);
-        s.yuqueHiddenProps = [...next];
-        await this.plugin.saveSettings();
-        this.display();
-      });
-    });
-    new import_obsidian9.Setting(containerEl).setName("\u9884\u8BA1\u9605\u8BFB\u65F6\u957F").setDesc("\u6309\u6BCF\u5206\u949F 400 \u5B57\u4F30\u7B97").addToggle(
-      (t) => t.setValue(s.showReadingTime).onChange(async (v) => {
-        s.showReadingTime = v;
-        await this.plugin.saveSettings();
-        this.plugin.reader.refresh(true);
-      })
-    );
-    new import_obsidian9.Setting(containerEl).setName("\u6807\u9898\u81EA\u52A8\u7F16\u53F7").setDesc("\u9605\u8BFB\u6A21\u5F0F\u4E0B\u4E3A\u6807\u9898\u663E\u793A\u5C42\u7EA7\u6570\u5B57\u7F16\u53F7\uFF081 / 1.1 / 1.1.1\uFF09\uFF1B\u6587\u6863\u81EA\u5E26\u7684\u7F16\u53F7\u4E0D\u53D7\u5F71\u54CD").addToggle(
-      (t) => t.setValue(s.headingNumbers).onChange(async (v) => {
-        s.headingNumbers = v;
-        await this.plugin.saveSettings();
-        this.plugin.reader.refresh(true);
-      })
-    );
-    new import_obsidian9.Setting(containerEl).setName("\u8DDF\u968F\u7A97\u53E3\u5BBD\u5EA6").setDesc("\u6B63\u6587\u94FA\u6EE1\u53EF\u7528\u5BBD\u5EA6\u3001\u5FFD\u7565\u4E0B\u9762\u7684\u680F\u5BBD\u503C\uFF1B\u4F1A\u4E00\u5E76\u653E\u5F00 Obsidian \u81EA\u5E26\u300C\u53EF\u8BFB\u884C\u5BBD\u300D\u7684\u9650\u5236").addToggle(
-      (t) => t.setValue(s.contentWidthAuto).onChange(async (v) => {
-        s.contentWidthAuto = v;
-        await this.plugin.saveSettings();
-        this.display();
-      })
-    );
-    new import_obsidian9.Setting(containerEl).setName("\u6B63\u6587\u680F\u5BBD").setDesc(
-      "\u9605\u8BFB\u6A21\u5F0F\u4E0E\u5B9E\u65F6\u9884\u89C8\u4E0B\u7684\u6B63\u6587\u5BBD\u5EA6\uFF08\u50CF\u7D20\uFF09\u3002600-900 \u6700\u5229\u4E8E\u9605\u8BFB\uFF0C\u8C03\u5BBD\u9002\u5408\u8868\u683C\u3001\u4EE3\u7801\u8F83\u591A\u7684\u6587\u6863"
-    ).addSlider((sl) => {
-      sl.setLimits(600, 1600, 20).setValue(s.contentWidth).setDynamicTooltip().setDisabled(s.contentWidthAuto).onChange(async (v) => {
-        s.contentWidth = v;
-        await this.plugin.saveSettings();
-      });
-    });
-    containerEl.createEl("h2", { text: "\u8BED\u96C0\u6587\u6863\u540C\u6B65" });
-    new import_obsidian9.Setting(containerEl).setName("\u8BED\u96C0 Token").setDesc("\u5728\u8BED\u96C0\u7F51\u9875\u300C\u8D26\u53F7\u8BBE\u7F6E \u2192 \u5F00\u53D1\u8005 \u2192 Token\u300D\u521B\u5EFA\uFF0C\u9700\u8981\u300C\u8BFB\u53D6\u77E5\u8BC6\u5E93\u3001\u6587\u6863\u300D\u6743\u9650").addText((t) => {
-      t.inputEl.type = "password";
-      t.setPlaceholder("\u586B\u5165\u8BED\u96C0 Token").setValue(s.yuqueToken).onChange(async (v) => {
-        s.yuqueToken = v.trim();
-        await this.plugin.saveSettings();
-      });
-    }).addButton(
-      (b) => b.setButtonText("\u6D4B\u8BD5\u8FDE\u63A5").onClick(async () => {
-        var _a, _b;
-        if (!s.yuqueToken) {
-          new import_obsidian9.Notice("\u8BF7\u5148\u586B\u5199 Token");
-          return;
-        }
-        b.setDisabled(true);
-        try {
-          const user = await new YuqueApi(s.yuqueToken).getUser();
-          new import_obsidian9.Notice(`\u8FDE\u63A5\u6210\u529F\uFF1A${(_b = (_a = user == null ? void 0 : user.name) != null ? _a : user == null ? void 0 : user.login) != null ? _b : "\u5DF2\u8BA4\u8BC1"}`);
-        } catch (e) {
-          new import_obsidian9.Notice(`\u8FDE\u63A5\u5931\u8D25\uFF1A${e.message}`);
-        } finally {
-          b.setDisabled(false);
-        }
-      })
-    );
-    new import_obsidian9.Setting(containerEl).setName("\u540C\u6B65\u4EFB\u52A1").setDesc("\u6BCF\u4E2A\u4EFB\u52A1\u53EF\u9009\u62E9\u76EE\u6807\u6587\u4EF6\u5939\uFF1B\u540C\u6B65\u65F6\u6309\u8BED\u96C0\u66F4\u65B0\u65F6\u95F4\u589E\u91CF\u62C9\u53D6").addButton(
-      (b) => b.setButtonText("\u6DFB\u52A0\u4EFB\u52A1").setCta().onClick(() => {
-        addSyncTaskFlow(this.plugin);
-      })
-    );
-    if (!s.yuqueTasks || s.yuqueTasks.length === 0) {
-      containerEl.createEl("p", {
-        text: "\u8FD8\u6CA1\u6709\u540C\u6B65\u4EFB\u52A1\u3002\u70B9\u51FB\u300C\u6DFB\u52A0\u4EFB\u52A1\u300D\uFF0C\u6216\u4F7F\u7528\u547D\u4EE4\u300C\u8BED\u96C0\u540C\u6B65\uFF1A\u6DFB\u52A0/\u66F4\u65B0\u540C\u6B65\u4EFB\u52A1\u300D\u3002",
-        cls: "setting-item-description"
-      });
-    } else {
-      for (const task of s.yuqueTasks) {
-        const desc = task.mode === "all" ? "\u6574\u4E2A\u77E5\u8BC6\u5E93" : `\u6307\u5B9A\u6587\u6863 ${task.selectedDocs.length} \u7BC7`;
-        const taskSetting = new import_obsidian9.Setting(containerEl).setName(task.repoName).setDesc(
-          `${task.namespace} \xB7 ${desc} \xB7 \u76EE\u6807\uFF1A${task.targetFolder || "\u4ED3\u5E93\u6839\u76EE\u5F55"}`
-        );
-        taskSetting.addButton(
-          (b) => b.setButtonText("\u7ACB\u5373\u540C\u6B65").onClick(() => {
-            runWithSyncModal(this.plugin, `\u540C\u6B65\u300C${task.repoName}\u300D`, async (log) => {
-              await syncTask(this.plugin, new YuqueApi(s.yuqueToken), task, log);
-            });
-          })
-        );
-        taskSetting.addButton(
-          (b) => b.setButtonText("\u5220\u9664").onClick(async () => {
-            s.yuqueTasks = s.yuqueTasks.filter((t) => t !== task);
-            await this.plugin.saveSettings();
-            this.display();
-          })
-        );
-      }
-    }
-    new import_obsidian9.Setting(containerEl).setName("\u56FE\u7247\u672C\u5730\u5316").setDesc("\u540C\u6B65\u65F6\u628A\u8BED\u96C0 CDN \u56FE\u7247\u4E0B\u8F7D\u5230\u4ED3\u5E93\u5185\uFF0C\u907F\u514D\u5916\u94FE\u5931\u6548").addToggle(
-      (t) => t.setValue(s.yuqueDownloadImages).onChange(async (v) => {
-        s.yuqueDownloadImages = v;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian9.Setting(containerEl).setName("\u56FE\u7247\u5B58\u653E\u6587\u4EF6\u5939").setDesc("\u4F4D\u4E8E\u6BCF\u4E2A\u540C\u6B65\u4EFB\u52A1\u7684\u76EE\u6807\u6587\u4EF6\u5939\u4E4B\u4E0B").addText(
-      (t) => t.setPlaceholder("assets").setValue(s.yuqueAssetsFolder).onChange(async (v) => {
-        s.yuqueAssetsFolder = v.trim() || "assets";
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian9.Setting(containerEl).setName("\u6587\u5B57\u989C\u8272").setDesc(
-      "\u8BED\u96C0\u5F69\u8272\u6587\u5B57\u600E\u4E48\u843D\u5230 Markdown\u3002Obsidian \u7684\u5B9E\u65F6\u9884\u89C8\u4E0D\u6E32\u67D3\u5185\u8054 HTML\uFF1A\u9009\u300C\u4FDD\u7559\u989C\u8272\u300D\u65F6\u7F16\u8F91\u6A21\u5F0F\u4E0B\u4F1A\u770B\u5230 span \u6E90\u7801\uFF1B\u60F3\u8BA9\u7F16\u8F91\u4E0E\u9605\u8BFB\u90FD\u4E0D\u89C1\u6E90\u7801\uFF0C\u5C31\u9009\u300C\u4E0D\u8F93\u51FA\u300D\u6216\u300C\u8F6C\u9AD8\u4EAE\u300D\u3002\u5DF2\u540C\u6B65\u6587\u6863\u91CC\u7684\u65E7\u6807\u8BB0\u7528\u547D\u4EE4\u300C\u6E05\u7406\u6587\u5B57\u989C\u8272\u6807\u8BB0\u300D\u5904\u7406"
-    ).addDropdown((d) => {
-      d.addOption("drop", "\u4E0D\u8F93\u51FA\u989C\u8272\uFF08\u7EAF\u6587\u672C\uFF09");
-      d.addOption("highlight", "\u8F6C\u4E3A\u9AD8\u4EAE ==\u6587\u5B57==");
-      d.addOption("keep", "\u4FDD\u7559\u989C\u8272\uFF08\u4EC5\u9605\u8BFB\u6A21\u5F0F\u6E32\u67D3\uFF09");
-      d.setValue(s.yuqueTextColor || "drop").onChange(async (v) => {
-        s.yuqueTextColor = v;
-        await this.plugin.saveSettings();
-      });
-    });
-    new import_obsidian9.Setting(containerEl).setName("\u672C\u5730\u6539\u52A8\u51B2\u7A81\u65F6\u5907\u4EFD").setDesc("\u8986\u76D6\u524D\u82E5\u68C0\u6D4B\u5230\u672C\u5730\u6587\u4EF6\u5DF2\u88AB\u4FEE\u6539\uFF0C\u5148\u5907\u4EFD\u5230 .yuque-backups/\uFF08\u6BCF\u7BC7\u4FDD\u7559\u6700\u8FD1 5 \u4EFD\uFF09").addToggle(
-      (t) => t.setValue(s.yuqueBackupOnConflict).onChange(async (v) => {
-        s.yuqueBackupOnConflict = v;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian9.Setting(containerEl).setName("\u6E05\u9664\u589E\u91CF\u540C\u6B65\u8BB0\u5F55").setDesc("\u4E0B\u6B21\u540C\u6B65\u5C06\u5F3A\u5236\u91CD\u65B0\u62C9\u53D6\u5168\u90E8\u6587\u6863\uFF08\u672C\u5730\u6587\u4EF6\u4E0D\u4F1A\u88AB\u5220\u9664\uFF09").addButton(
-      (b) => b.setButtonText("\u6E05\u9664").onClick(async () => {
-        s.yuqueSyncState = {};
-        await this.plugin.saveSettings();
-        new import_obsidian9.Notice("\u5DF2\u6E05\u9664\u540C\u6B65\u8BB0\u5F55\uFF0C\u4E0B\u6B21\u5C06\u5168\u91CF\u62C9\u53D6");
-      })
-    );
+    this.applyHiddenFolder();
+    (_a = this.topBars) == null ? void 0 : _a.refresh();
+    this.scheduleHiddenFolderScan();
   }
 };

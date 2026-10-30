@@ -1,22 +1,41 @@
-import { Notice, Plugin, PluginSettingTab, Setting, TAbstractFile, TFolder } from "obsidian";
+import { Notice, Plugin, TAbstractFile, TFolder } from "obsidian";
 import { ReaderEnhancer } from "./reader";
 import { YuqueSlashSuggest } from "./slash";
-import { buildYuqueToolbar } from "./toolbar";
-import { YuqueApi } from "./yuque/api";
+import { buildTableToolbar } from "./toolbar";
+import { YuqueApi, type YuqueRateInfo } from "./yuque/api";
+import {
+  emptyRateLog,
+  migrateRateLog,
+  recordResponse,
+  type RateLog,
+} from "./yuque/rate";
 import type { ColorMode } from "./yuque/lake";
-import { syncTask } from "./yuque/sync";
-import { addSyncTaskFlow, diagnoseFlow, runWithSyncModal, syncAllFlow } from "./yuque/ui";
+import { addSyncTaskFlow, diagnoseFlow, manageTasksFlow, syncAllFlow } from "./yuque/ui";
 import { relinkFlow } from "./yuque/relink";
 import { cleanColorsFlow } from "./yuque/clean";
 import {
   buildPropertyVisibilityCss,
   hiddenSlugsFor,
   hidesWholePanel,
-  PROPERTY_TOGGLES,
 } from "./yuque/frontmatter";
 import { backfillFlow } from "./yuque/backfill";
+import { orphanCleanupFlow } from "./yuque/orphan";
+import { TopBarManager } from "./topbar";
+import { registerEditorCommands } from "./editor-commands";
+import {
+  buildHiddenFolderCss,
+  clearHiddenFolderNodes,
+  markHiddenFolderNodes,
+} from "./yuque/explorer";
+import {
+  clearSyncedDocNodes,
+  markSyncedDocNodes,
+  syncedDocPaths,
+} from "./yuque/explorer-sync";
 import { applyRename, migrateSyncState } from "./yuque/state";
 import type { YuqueSyncState } from "./yuque/state";
+import { loadSettingsWithMigration } from "./settings";
+import { YuqueSettingTab } from "./settings-tab";
 
 export interface YuqueSyncTask {
   repoId: number;
@@ -29,11 +48,12 @@ export interface YuqueSyncTask {
 }
 
 export interface YuqueSettings {
-  toolbar: boolean;
+  /** 文档顶部的固定工具栏与元信息行（编辑模式）；元信息随它一起开 */
+  topBar: boolean;
   slashMenu: boolean;
   reader: boolean;
+  /** 阅读模式文档头（标题 / 字数 / 阅读时长 / 语雀时间 / 标签）总开关 */
   showDocHeader: boolean;
-  showReadingTime: boolean;
   contentWidth: number;
   /** 正文宽度跟随窗口（忽略 contentWidth，正文铺满可用宽度） */
   contentWidthAuto: boolean;
@@ -42,8 +62,23 @@ export interface YuqueSettings {
   // ---- 语雀同步 ----
   yuqueToken: string;
   yuqueTasks: YuqueSyncTask[];
+  /**
+   * 启动后自动执行一次「同步全部任务」（延迟触发，复用手动同步的弹窗与停止按钮）。
+   * 默认关闭：自动消耗 API 配额的事不该替用户做主，尤其语雀的网关惩罚态难以预期。
+   */
+  yuqueAutoSyncOnStart: boolean;
   yuqueDownloadImages: boolean;
   yuqueAssetsFolder: string;
+  /**
+   * 在文件浏览器中隐藏上面的图片文件夹。
+   * 只是视觉隐藏：目录与图片仍在仓库里，正文的图片引用与渲染不受影响。
+   */
+  yuqueHideAssetsFolder: boolean;
+  /**
+   * 在文件浏览器里给语雀同步文档的行尾加一个小圆点。
+   * 同步状态此前只在 topbar 元信息行里可见，必须打开文档才知道；圆点让目录一眼可辨。
+   */
+  yuqueMarkSyncedDocs: boolean;
   /**
    * 属性面板里要隐藏的语雀属性（slug 见 PROPERTY_TOGGLES）。
    * 注意：属性始终写在文件里，这里只控制它在文档顶部显不显示。
@@ -53,54 +88,114 @@ export interface YuqueSettings {
   yuqueTextColor: ColorMode;
   /** 覆盖写入前，若检测到本地文件已被用户修改，先备份一份 */
   yuqueBackupOnConflict: boolean;
+  /**
+   * 每次同步最多发多少次 API 请求。0 = 自动：
+   * 能读到 `X-RateLimit-Remaining` 就按剩余额度走，读不到就不限（只保留 429 熔断）。
+   * 上限只在**任务边界**生效——额度不够跑完下一个库就不开跑，不会把某个库拉一半。
+   */
+  yuqueRequestBudget: number;
+  /** 配额观测记录：本小时请求数 + 429 时间线 + 观测门槛（见 yuque/rate.ts） */
+  yuqueRateLog: RateLog;
   /** 文档同步状态：`${namespace}/${slug}` → 结构化同步记录（含本地路径） */
   yuqueSyncState: YuqueSyncState;
 }
 
 export const DEFAULT_SETTINGS: YuqueSettings = {
-  toolbar: true,
+  topBar: true,
   slashMenu: true,
   reader: true,
   showDocHeader: true,
-  showReadingTime: true,
   contentWidth: 820,
   contentWidthAuto: false,
   headingNumbers: true,
   yuqueToken: "",
   yuqueTasks: [],
+  yuqueAutoSyncOnStart: false,
   yuqueDownloadImages: true,
   yuqueAssetsFolder: "assets",
+  yuqueHideAssetsFolder: true,
+  yuqueMarkSyncedDocs: true,
   yuqueHiddenProps: [],
   // 默认不输出颜色：Obsidian 实时预览不渲染内联 HTML，输出 span 只会在编辑模式下露出源码
   yuqueTextColor: "drop",
   yuqueBackupOnConflict: true,
+  // 默认「自动」而不是某个数字：语雀的额度不透明（官方称 5000/小时且返回 X-RateLimit-*，
+  // 但实测 429 上见不到该头），拿官方数字当预算等于用一把没量过自己的尺子限速
+  yuqueRequestBudget: 0,
+  yuqueRateLog: emptyRateLog(),
   yuqueSyncState: {},
 };
 
 /** 承载「隐藏笔记属性」规则的 <style> 元素 id */
 const HIDDEN_PROPS_STYLE_ID = "yuque-hidden-properties";
+/** 承载「文件浏览器中隐藏图片文件夹」规则的 <style> 元素 id */
+const HIDDEN_FOLDERS_STYLE_ID = "yuque-hidden-folders";
+
+/**
+ * 启动自动同步的延迟。
+ * Obsidian 启动本身就在忙索引与首屏渲染，同步的第一批请求不该跟它抢启动窗口；
+ * 15 秒后用户多半已经落座，此时弹出的同步进度也看得见、随时可停。
+ */
+const AUTO_SYNC_DELAY_MS = 15_000;
+
+/**
+ * 配额观测量最多每 2 秒落盘一次。
+ * 一次全量同步会发两千多次请求，逐次 saveData 是在折磨磁盘；而观测量的价值只在
+ * 「跨会话仍在」这一点上，晚两秒写没有任何损失。撞上 429 是例外——立即落盘。
+ */
+const RATE_SAVE_INTERVAL_MS = 2000;
 
 export default class YuqueStylePlugin extends Plugin {
   settings: YuqueSettings = { ...DEFAULT_SETTINGS };
   reader!: ReaderEnhancer;
+  topBars!: TopBarManager;
+  /** 文件浏览器里的 DOM 变更观察器（见 registerExplorerObserver） */
+  private explorerObserver?: MutationObserver;
+  /** 已挂上观察器的文件浏览器视图根节点（避免重复 observe） */
+  private readonly observedExplorers = new WeakSet<HTMLElement>();
+  private explorerScanTimer: number | null = null;
+  /** 上次报告的命中条目数，用于「只在变化时打一行日志」 */
+  private hiddenFolderHits = -1;
+  /** 上次报告的同步文档标记数（同上，只在变化时打日志） */
+  private syncedDocHits = -1;
+  /** 配额观测量落盘的节流计时器 */
+  private rateSaveTimer: number | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
     // 版本标识：控制台可查（Ctrl+Shift+I），用于确认加载的是最新代码
     console.log(`[yuque-style] loaded v${this.manifest.version}`);
 
-    // ---- 编辑器：悬浮格式工具栏 ----
-    this.registerEditorExtension(buildYuqueToolbar(() => this.settings.toolbar, this.app));
+    // 配额观测的收尾：卸载前把还没落盘的那批观测量补写一次（最多 2 秒的量）
+    this.register(() => {
+      if (this.rateSaveTimer !== null) {
+        window.clearTimeout(this.rateSaveTimer);
+        this.rateSaveTimer = null;
+        void this.persistRateLog();
+      }
+    });
+
+    // ---- 编辑器：表格工具条（光标进表格才浮出；文本格式动作已并入顶部工具栏）----
+    this.registerEditorExtension(buildTableToolbar());
 
     // ---- 编辑器：语雀式斜杠菜单（输入 "/" 唤起块插入）----
     this.registerEditorSuggest(new YuqueSlashSuggest(this));
+
+    // ---- 高频格式动作注册为命令（可在「设置 → 快捷键」里绑定，与顶栏同一份动作内核）----
+    registerEditorCommands(this);
 
     // ---- 阅读模式：文档头 / 排版 ----
     this.reader = new ReaderEnhancer(this);
     this.reader.register();
 
+    // ---- 文档顶部：固定工具栏 + 元信息行（编辑模式）----
+    this.topBars = new TopBarManager(this);
+    this.topBars.register();
+
     this.applyCssVars();
     this.applyPropertyVisibility();
+    this.applyHiddenFolder();
+    this.registerExplorerObserver();
     this.addSettingTab(new YuqueSettingTab(this));
 
     // ---- 语雀风格内容块快捷插入 ----
@@ -159,6 +254,12 @@ export default class YuqueStylePlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "yuque-sync-manage",
+      name: "语雀同步：管理同步任务（单独同步 / 删除）",
+      callback: () => manageTasksFlow(this),
+    });
+
+    this.addCommand({
       id: "yuque-diagnose",
       name: "语雀同步：诊断（排查拉取为空等问题）",
       callback: () => diagnoseFlow(this),
@@ -182,12 +283,37 @@ export default class YuqueStylePlugin extends Plugin {
       callback: () => backfillFlow(this),
     });
 
+    this.addCommand({
+      id: "yuque-clean-orphans",
+      name: "语雀同步：清理孤儿文档副本（语雀端已删除的文档，移入回收站）",
+      callback: () => orphanCleanupFlow(this),
+    });
+
     // 本地重命名 / 移动后让同步记录跟随，否则下一轮会找不到原文件而重复创建
     this.registerEvent(
       this.app.vault.on("rename", (file: TAbstractFile, oldPath: string) => {
         this.handleRename(file, oldPath);
       }),
     );
+
+    this.scheduleAutoSync();
+  }
+
+  /**
+   * 启动自动同步（yuqueAutoSyncOnStart）：延迟触发一次「立即同步全部任务」。
+   * 复用 syncAllFlow 的弹窗、停止按钮与既有的预算/熔断兜底，不另起一套静默通道——
+   * 自动触发的同步更需要让用户看得见它正在消耗配额。
+   * 无 Token 或无任务时静默跳过：条件不满足不是故障，弹窗提示只会添乱。
+   */
+  private scheduleAutoSync(): void {
+    if (!this.settings.yuqueAutoSyncOnStart) return;
+    if (!this.settings.yuqueToken || this.settings.yuqueTasks.length === 0) return;
+    const timer = window.setTimeout(() => {
+      if (!this.settings.yuqueAutoSyncOnStart) return; // 等待期间被关掉就不跑
+      console.log("[yuque-style] 启动自动同步开始");
+      void syncAllFlow(this);
+    }, AUTO_SYNC_DELAY_MS);
+    this.register(() => window.clearTimeout(timer));
   }
 
   /** 文件被重命名或移动时，同步更新同步记录里的本地路径 */
@@ -210,6 +336,12 @@ export default class YuqueStylePlugin extends Plugin {
     document.body.classList.remove("yuque-width-auto");
     document.body.classList.remove("yuque-hide-all-props");
     document.getElementById(HIDDEN_PROPS_STYLE_ID)?.remove();
+    document.getElementById(HIDDEN_FOLDERS_STYLE_ID)?.remove();
+    // 注入的样式已移除，标记类也一并清掉，不给下次启用留下残留
+    this.explorerObserver?.disconnect();
+    clearHiddenFolderNodes();
+    clearSyncedDocNodes();
+    this.topBars?.destroyAll();
   }
 
   /**
@@ -238,6 +370,110 @@ export default class YuqueStylePlugin extends Plugin {
     el.textContent = css;
   }
 
+  /**
+   * 把「隐藏图片文件夹」的规则写进一个 <style>。
+   *
+   * 只隐藏文件浏览器里的条目，**不动仓库结构**：图片引用走 vault 路径解析，
+   * 隐藏与否都不影响正文里的 `![[assets/x.png]]` 显示。用 CSS 而不是真的把目录移走，
+   * 是因为「移走」会连带改写所有正文里的图片路径，代价与风险都不成比例。
+   */
+  applyHiddenFolder(): void {
+    // 先撤销上一轮的标记：改目录名或关掉开关时不能留下「幽灵隐藏」
+    clearHiddenFolderNodes();
+    const css = this.settings.yuqueHideAssetsFolder
+      ? buildHiddenFolderCss(this.settings.yuqueAssetsFolder)
+      : "";
+    let el = document.getElementById(HIDDEN_FOLDERS_STYLE_ID) as HTMLStyleElement | null;
+    if (!css) {
+      el?.remove();
+      return;
+    }
+    if (!el) {
+      el = document.createElement("style");
+      el.id = HIDDEN_FOLDERS_STYLE_ID;
+      document.head.appendChild(el);
+    }
+    el.textContent = css;
+    // 规则变了，重新报一次命中数（也顺带立刻标记，不必等下一次 DOM 变更）
+    this.hiddenFolderHits = -1;
+    this.markHiddenFolders();
+  }
+
+  /** 当前所有文件浏览器视图的根节点（桌面侧栏 / 浮窗 / 移动端抽屉都算） */
+  private explorerRoots(): HTMLElement[] {
+    return this.app.workspace
+      .getLeavesOfType("file-explorer")
+      .map((leaf) => (leaf.view as unknown as { containerEl?: HTMLElement } | null)?.containerEl)
+      .filter((el): el is HTMLElement => !!el);
+  }
+
+  /**
+   * 文件浏览器的展开 / 刷新是纯 DOM 变更，没有可挂的事件，只能用 MutationObserver 兜住。
+   * 观察器挂在**视图根节点**而不是整个 body：编辑器里每敲一个字都会改 DOM，
+   * 挂在 body 上等于让扫描跟着输入跑。
+   */
+  private registerExplorerObserver(): void {
+    this.explorerObserver = new MutationObserver(() => this.scheduleHiddenFolderScan());
+    this.register(() => {
+      this.explorerObserver?.disconnect();
+      if (this.explorerScanTimer !== null) window.clearTimeout(this.explorerScanTimer);
+    });
+    // 浮窗、移动端抽屉会新建文件浏览器视图，出现时补挂观察器
+    this.registerEvent(this.app.workspace.on("layout-change", () => this.attachExplorerObserver()));
+    this.attachExplorerObserver();
+  }
+
+  private attachExplorerObserver(): void {
+    for (const el of this.explorerRoots()) {
+      if (this.observedExplorers.has(el)) continue;
+      this.observedExplorers.add(el);
+      this.explorerObserver?.observe(el, { childList: true, subtree: true });
+    }
+    this.scheduleHiddenFolderScan();
+  }
+
+  /** 防抖：展开一整棵目录树会连打几十次变更，攒一次扫描就够 */
+  private scheduleHiddenFolderScan(): void {
+    if (this.explorerScanTimer !== null) window.clearTimeout(this.explorerScanTimer);
+    this.explorerScanTimer = window.setTimeout(() => {
+      this.explorerScanTimer = null;
+      this.markHiddenFolders();
+      this.markSyncedDocs();
+    }, 120);
+  }
+
+  /**
+   * 给文件浏览器里的图片文件夹条目打标记（CSS 类的规则在注入的 <style> 里）。
+   * 命中数变化时打一行日志——远程排查「隐藏没生效」时，先看这行有没有出现：
+   * 命中 0 说明 DOM 里没找到 `data-path` 匹配的条目，即选择器/结构对不上。
+   */
+  private markHiddenFolders(): void {
+    if (!this.settings.yuqueHideAssetsFolder) return;
+    const name = this.settings.yuqueAssetsFolder;
+    let hits = 0;
+    for (const el of this.explorerRoots()) hits += markHiddenFolderNodes(el, name);
+    if (hits !== this.hiddenFolderHits) {
+      this.hiddenFolderHits = hits;
+      console.log(`[yuque-style] 文件浏览器中命中 ${hits} 个「${name}」条目（已隐藏）`);
+    }
+  }
+
+  /**
+   * 给文件浏览器里的语雀同步文档打标记（圆点样式在 styles.css）。
+   * 关掉开关时传空集合——markSyncedDocNodes 会顺带摘掉旧标记，不留幽灵圆点。
+   */
+  private markSyncedDocs(): void {
+    const synced = this.settings.yuqueMarkSyncedDocs
+      ? syncedDocPaths(this.settings.yuqueSyncState || {})
+      : new Set<string>();
+    let hits = 0;
+    for (const el of this.explorerRoots()) hits += markSyncedDocNodes(el, synced);
+    if (hits !== this.syncedDocHits) {
+      this.syncedDocHits = hits;
+      console.log(`[yuque-style] 文件浏览器中标记 ${hits} 篇语雀同步文档`);
+    }
+  }
+
   applyCssVars(): void {
     document.documentElement.style.setProperty(
       "--yuque-content-width",
@@ -249,298 +485,61 @@ export default class YuqueStylePlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    const loaded = (await this.loadData()) as Partial<YuqueSettings> | null;
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
+    const loaded = await this.loadData();
+    // 补默认值 + 剔除已废弃的键（详见 src/settings.ts）；返回值里带出实际动了哪些键
+    const { settings, removed } = loadSettingsWithMigration(loaded, DEFAULT_SETTINGS);
+    this.settings = settings;
     // 旧版本只存 updated_at 字符串，此处统一升级为结构化记录（幂等，可重复执行）
     this.settings.yuqueSyncState = migrateSyncState(this.settings.yuqueSyncState);
+    // 配额观测记录同理：字段缺失/类型不对一律回默认，坏了也不能让插件起不来
+    this.settings.yuqueRateLog = migrateRateLog(this.settings.yuqueRateLog);
+    if (removed.length > 0) {
+      // 立即回写：否则废弃键会在每次 saveData 时被原样写回，越积越多
+      await this.saveData(this.settings);
+      console.log(`[yuque-style] 已清理废弃配置项：${removed.join("、")}`);
+    }
+  }
+
+  /**
+   * 统一的 API 构造入口：把观测回调注进去，于是每次请求都会进「本小时请求数」与
+   * 429 时间线。散在各处的 `new YuqueApi(...)` 一律改走这里，别再各自造一个。
+   */
+  createApi(): YuqueApi {
+    return new YuqueApi(this.settings.yuqueToken, (info) => this.recordRate(info));
+  }
+
+  /**
+   * 配额观测记账（见 yuque/rate.ts）。每次请求都会调用，所以落盘必须节流：
+   * 429 立即落盘（这类事件必须活过重启），其余最多每 2 秒写一次。
+   */
+  private recordRate(info: YuqueRateInfo): void {
+    recordResponse(this.settings.yuqueRateLog, info);
+    if (info.status === 429) {
+      void this.persistRateLog();
+      return;
+    }
+    if (this.rateSaveTimer !== null) return;
+    this.rateSaveTimer = window.setTimeout(() => {
+      this.rateSaveTimer = null;
+      void this.persistRateLog();
+    }, RATE_SAVE_INTERVAL_MS);
+  }
+
+  /** 只写 data.json：saveSettings 会连带重算 CSS 与顶栏，同步途中每两秒刷一遍既无必要也浪费 */
+  private async persistRateLog(): Promise<void> {
+    await this.saveData(this.settings);
   }
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
     this.applyCssVars();
     this.applyPropertyVisibility();
+    this.applyHiddenFolder();
+    // 顶栏的开关、元信息、阅读时长都从这个对象取，设置一变就同步过去
+    this.topBars?.refresh();
+    // 同步记录 / 标记开关变了，防抖刷一遍文件浏览器的圆点标记
+    this.scheduleHiddenFolderScan();
   }
 }
 
 export { YuqueStylePlugin };
-
-class YuqueSettingTab extends PluginSettingTab {
-  private plugin: YuqueStylePlugin;
-
-  constructor(plugin: YuqueStylePlugin) {
-    super(plugin.app, plugin);
-    this.plugin = plugin;
-  }
-
-  display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
-    const s = this.plugin.settings;
-
-    containerEl.createEl("h2", { text: "语雀风格编辑与阅读" });
-
-    new Setting(containerEl)
-      .setName("悬浮格式工具栏")
-      .setDesc("编辑器中选中文本时，在选区上方弹出语雀式格式工具栏")
-      .addToggle((t) =>
-        t.setValue(s.toolbar).onChange(async (v) => {
-          s.toolbar = v;
-          await this.plugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("斜杠快捷菜单")
-      .setDesc("编辑时输入 \"/\" 弹出语雀式块插入菜单（标题 / 卡片 / 待办 / 表格等）")
-      .addToggle((t) =>
-        t.setValue(s.slashMenu).onChange(async (v) => {
-          s.slashMenu = v;
-          await this.plugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("阅读增强")
-      .setDesc("阅读模式下启用文档头与语雀式排版")
-      .addToggle((t) =>
-        t.setValue(s.reader).onChange(async (v) => {
-          s.reader = v;
-          await this.plugin.saveSettings();
-          this.plugin.reader.refresh(true);
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("文档头信息")
-      .setDesc(
-        "在文档顶部展示标题、字数、阅读时长、创建日期与标签；" +
-          "关闭后连下面的笔记属性也一起隐藏（总开关）",
-      )
-      .addToggle((t) =>
-        t.setValue(s.showDocHeader).onChange(async (v) => {
-          s.showDocHeader = v;
-          await this.plugin.saveSettings();
-          this.plugin.reader.refresh(true);
-          // 重绘：让下面的笔记属性开关跟着禁用/启用
-          this.display();
-        }),
-      );
-
-    // 笔记属性：属性始终写在文件里，这里只控制它在文档顶部的属性面板显不显示。
-    // 用「一个下拉 + 逐项切换」而不是铺五行 toggles，设置页太长了
-    const effective = new Set(hiddenSlugsFor(s.showDocHeader, s.yuqueHiddenProps || []));
-    new Setting(containerEl)
-      .setName("笔记属性")
-      .setDesc(
-        s.showDocHeader
-          ? "点开选择要隐藏（或恢复）的属性：属性仍写在文件里，不影响读取、双链与其它插件；" +
-              "全部隐藏时文档顶部的属性面板会整块收起"
-          : "「文档头信息」已关闭，笔记属性当前全部隐藏；打开上面的总开关后再单独调整",
-      )
-      .addDropdown((d) => {
-        d.addOption("__summary__", `当前：隐藏 ${effective.size} / ${PROPERTY_TOGGLES.length} 个`);
-        d.addOption("__show_all__", "全部显示");
-        d.addOption("__hide_all__", "全部隐藏");
-        for (const prop of PROPERTY_TOGGLES) {
-          const state = effective.has(prop.slug) ? "已隐藏" : "已显示";
-          d.addOption(prop.slug, `${state}：${prop.label}`);
-        }
-        d.setValue("__summary__").setDisabled(!s.showDocHeader);
-        d.onChange(async (v) => {
-          if (v === "__summary__") return; // 只是当前状态的显示，不改变任何设置
-          const next = new Set(s.yuqueHiddenProps || []);
-          if (v === "__show_all__") next.clear();
-          else if (v === "__hide_all__") PROPERTY_TOGGLES.forEach((p) => next.add(p.slug));
-          else if (next.has(v)) next.delete(v);
-          else next.add(v);
-          s.yuqueHiddenProps = [...next];
-          await this.plugin.saveSettings();
-          this.display(); // 重绘：下拉里每项的「已显示/已隐藏」与统计都要跟着更新
-        });
-      });
-
-    new Setting(containerEl)
-      .setName("预计阅读时长")
-      .setDesc("按每分钟 400 字估算")
-      .addToggle((t) =>
-        t.setValue(s.showReadingTime).onChange(async (v) => {
-          s.showReadingTime = v;
-          await this.plugin.saveSettings();
-          this.plugin.reader.refresh(true);
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("标题自动编号")
-      .setDesc("阅读模式下为标题显示层级数字编号（1 / 1.1 / 1.1.1）；文档自带的编号不受影响")
-      .addToggle((t) =>
-        t.setValue(s.headingNumbers).onChange(async (v) => {
-          s.headingNumbers = v;
-          await this.plugin.saveSettings();
-          this.plugin.reader.refresh(true);
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("跟随窗口宽度")
-      .setDesc("正文铺满可用宽度、忽略下面的栏宽值；会一并放开 Obsidian 自带「可读行宽」的限制")
-      .addToggle((t) =>
-        t.setValue(s.contentWidthAuto).onChange(async (v) => {
-          s.contentWidthAuto = v;
-          await this.plugin.saveSettings();
-          this.display(); // 重绘，让下面的栏宽滑块跟着禁用/启用
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("正文栏宽")
-      .setDesc(
-        "阅读模式与实时预览下的正文宽度（像素）。600-900 最利于阅读，调宽适合表格、代码较多的文档",
-      )
-      .addSlider((sl) => {
-        sl.setLimits(600, 1600, 20)
-          .setValue(s.contentWidth)
-          .setDynamicTooltip()
-          .setDisabled(s.contentWidthAuto)
-          .onChange(async (v) => {
-            s.contentWidth = v;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    // ================ 语雀同步 ================
-    containerEl.createEl("h2", { text: "语雀文档同步" });
-
-    new Setting(containerEl)
-      .setName("语雀 Token")
-      .setDesc("在语雀网页「账号设置 → 开发者 → Token」创建，需要「读取知识库、文档」权限")
-      .addText((t) => {
-        t.inputEl.type = "password";
-        t.setPlaceholder("填入语雀 Token")
-          .setValue(s.yuqueToken)
-          .onChange(async (v) => {
-            s.yuqueToken = v.trim();
-            await this.plugin.saveSettings();
-          });
-      })
-      .addButton((b) =>
-        b.setButtonText("测试连接").onClick(async () => {
-          if (!s.yuqueToken) {
-            new Notice("请先填写 Token");
-            return;
-          }
-          b.setDisabled(true);
-          try {
-            const user = await new YuqueApi(s.yuqueToken).getUser();
-            new Notice(`连接成功：${user?.name ?? user?.login ?? "已认证"}`);
-          } catch (e) {
-            new Notice(`连接失败：${(e as Error).message}`);
-          } finally {
-            b.setDisabled(false);
-          }
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("同步任务")
-      .setDesc("每个任务可选择目标文件夹；同步时按语雀更新时间增量拉取")
-      .addButton((b) =>
-        b.setButtonText("添加任务").setCta().onClick(() => {
-          addSyncTaskFlow(this.plugin);
-        }),
-      );
-
-    if (!s.yuqueTasks || s.yuqueTasks.length === 0) {
-      containerEl.createEl("p", {
-        text: "还没有同步任务。点击「添加任务」，或使用命令「语雀同步：添加/更新同步任务」。",
-        cls: "setting-item-description",
-      });
-    } else {
-      for (const task of s.yuqueTasks) {
-        const desc =
-          task.mode === "all"
-            ? "整个知识库"
-            : `指定文档 ${task.selectedDocs.length} 篇`;
-        const taskSetting = new Setting(containerEl)
-          .setName(task.repoName)
-          .setDesc(
-            `${task.namespace} · ${desc} · 目标：${task.targetFolder || "仓库根目录"}`,
-          );
-        taskSetting.addButton((b) =>
-          b.setButtonText("立即同步").onClick(() => {
-            runWithSyncModal(this.plugin, `同步「${task.repoName}」`, async (log) => {
-              await syncTask(this.plugin, new YuqueApi(s.yuqueToken), task, log);
-            });
-          }),
-        );
-        taskSetting.addButton((b) =>
-          b.setButtonText("删除").onClick(async () => {
-            s.yuqueTasks = s.yuqueTasks.filter((t) => t !== task);
-            await this.plugin.saveSettings();
-            this.display();
-          }),
-        );
-      }
-    }
-
-    new Setting(containerEl)
-      .setName("图片本地化")
-      .setDesc("同步时把语雀 CDN 图片下载到仓库内，避免外链失效")
-      .addToggle((t) =>
-        t.setValue(s.yuqueDownloadImages).onChange(async (v) => {
-          s.yuqueDownloadImages = v;
-          await this.plugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("图片存放文件夹")
-      .setDesc("位于每个同步任务的目标文件夹之下")
-      .addText((t) =>
-        t.setPlaceholder("assets")
-          .setValue(s.yuqueAssetsFolder)
-          .onChange(async (v) => {
-            s.yuqueAssetsFolder = v.trim() || "assets";
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName("文字颜色")
-      .setDesc(
-        "语雀彩色文字怎么落到 Markdown。Obsidian 的实时预览不渲染内联 HTML：" +
-          "选「保留颜色」时编辑模式下会看到 span 源码；想让编辑与阅读都不见源码，" +
-          "就选「不输出」或「转高亮」。已同步文档里的旧标记用命令「清理文字颜色标记」处理",
-      )
-      .addDropdown((d) => {
-        d.addOption("drop", "不输出颜色（纯文本）");
-        d.addOption("highlight", "转为高亮 ==文字==");
-        d.addOption("keep", "保留颜色（仅阅读模式渲染）");
-        d.setValue(s.yuqueTextColor || "drop").onChange(async (v) => {
-          s.yuqueTextColor = v as ColorMode;
-          await this.plugin.saveSettings();
-        });
-      });
-
-    new Setting(containerEl)
-      .setName("本地改动冲突时备份")
-      .setDesc("覆盖前若检测到本地文件已被修改，先备份到 .yuque-backups/（每篇保留最近 5 份）")
-      .addToggle((t) =>
-        t.setValue(s.yuqueBackupOnConflict).onChange(async (v) => {
-          s.yuqueBackupOnConflict = v;
-          await this.plugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("清除增量同步记录")
-      .setDesc("下次同步将强制重新拉取全部文档（本地文件不会被删除）")
-      .addButton((b) =>
-        b.setButtonText("清除").onClick(async () => {
-          s.yuqueSyncState = {};
-          await this.plugin.saveSettings();
-          new Notice("已清除同步记录，下次将全量拉取");
-        }),
-      );
-  }
-}

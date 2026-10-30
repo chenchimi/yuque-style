@@ -1,6 +1,6 @@
 {
   "name": "yuque-style",
-  "version": "0.1.0",
+  "version": "0.9.3",
   "description": "语雀风格编辑阅读体验 + 语雀文档同步（Obsidian 插件）",
   "main": "main.js",
   "scripts": {

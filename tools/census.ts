@@ -11,6 +11,7 @@
 import fs from "fs";
 import { YuqueApi } from "../src/yuque/api";
 import type { YuqueRepo } from "../src/yuque/api";
+import { describeQuota, YUQUE_QUOTA_PER_HOUR } from "../src/yuque/quota";
 
 function arg(name: string, def: string): string {
   const hit = process.argv.slice(2).find((a) => a.startsWith(`--${name}=`));
@@ -19,7 +20,12 @@ function arg(name: string, def: string): string {
 
 const PER_DOC = Number(arg("perDoc", "0.41"));
 const PER_IMAGE = Number(arg("perImage", "0.5"));
-const QUOTA = Number(arg("quota", "5000")); // 语雀免费账户 API 配额（次/小时）
+// 配额默认值取自 src/yuque/quota.ts（全仓库唯一来源）。
+// 语雀**不返回**配额头，实测之前该值就是「未知」——此时绝不给"是否会超配额"的结论：
+// 这里曾经写死过传闻的 5000，用它算百分比等于拿猜测当结论（已踩过坑）。
+const QUOTA = Number(
+  arg("quota", YUQUE_QUOTA_PER_HOUR === null ? "0" : String(YUQUE_QUOTA_PER_HOUR)),
+);
 
 function fmt(sec: number): string {
   if (sec < 60) return `${sec.toFixed(0)} 秒`;
@@ -105,12 +111,21 @@ async function main(): Promise<void> {
   );
 
   console.log("");
-  console.log("=== API 配额（免费账户约 " + QUOTA + " 次/小时）===");
-  const pct = ((all.requests / QUOTA) * 100).toFixed(0);
-  console.log(
-    `全量一輪请求 ${all.requests} 次 = 配额的 ${pct}%` +
-      (all.requests > QUOTA ? " → 会触发 429 退避，实际更久" : " → 配额内可完成"),
-  );
+  if (QUOTA > 0) {
+    console.log(`=== API 配额（${describeQuota()}）===`);
+    const pct = ((all.requests / QUOTA) * 100).toFixed(0);
+    console.log(
+      `全量一轮请求 ${all.requests} 次 = 配额的 ${pct}%` +
+        (all.requests > QUOTA
+          ? " → 必须分多个小时窗口跑，中途会被 429 熔断（熔断后重跑自动续传）"
+          : " → 单个窗口内可完成"),
+    );
+  } else {
+    console.log("=== API 配额 ===");
+    console.log(describeQuota());
+    console.log(`全量一轮请求 ${all.requests} 次（占配额比例**未知**：不要拿传闻数字下结论）`);
+    console.log("实测方法：node tools/quota-ceiling.mjs --recover（测完填进 src/yuque/quota.ts）");
+  }
 }
 
 main().catch((e) => {

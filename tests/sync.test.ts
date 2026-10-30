@@ -4,6 +4,7 @@ import { encodeLinkTarget, syncTask } from "../src/yuque/sync";
 import { applyRename, hashContent } from "../src/yuque/state";
 import { FakeVault } from "./mocks/vault";
 import type { YuqueStylePlugin } from "../src/main";
+import { YuqueQuotaError } from "../src/yuque/api";
 import type { YuqueApi, YuqueDocDetail, YuqueDocSummary, YuqueTocNode } from "../src/yuque/api";
 import type { YuqueSyncTaskType } from "../src/yuque/sync";
 
@@ -21,6 +22,12 @@ interface SetupOpts {
   state?: Record<string, unknown>;
   /** 默认「语雀」；带空格的目录名用来回归「图片链接退化成普通文本」的 bug */
   targetFolder?: string;
+  /** 设置项「每次同步请求上限」；0 = 自动 */
+  budget?: number;
+  /** 本次运行已发出的请求数（真实实现是 YuqueApi.requestCount） */
+  usedThisRun?: number;
+  /** 响应头给出的剩余额度（真实实现是 YuqueApi.remainingFromHeader） */
+  headerRemaining?: number | null;
 }
 
 function doc(slug: string, title: string, updated_at: string): YuqueDocSummary {
@@ -39,6 +46,7 @@ function setup(opts: SetupOpts) {
       yuqueDownloadImages: opts.downloadImages ?? false,
       yuqueAssetsFolder: "assets",
       yuqueBackupOnConflict: opts.backupOnConflict ?? true,
+      yuqueRequestBudget: opts.budget ?? 0,
       yuqueSyncState: (opts.state ?? {}) as Record<string, never>,
     },
     app: {
@@ -78,6 +86,9 @@ function setup(opts: SetupOpts) {
       return detail;
     }),
     downloadBinary: vi.fn(async () => new Uint8Array([1, 2, 3]).buffer),
+    // 预算判定读这两个字段（真实实现见 api.ts 的 YuqueApi.requestCount / remainingFromHeader）
+    requestCount: opts.usedThisRun ?? 0,
+    remainingFromHeader: opts.headerRemaining ?? null,
   };
 
   const task: YuqueSyncTaskType = {
@@ -719,5 +730,143 @@ describe("syncTask · 图片本地化", () => {
 
     expect(s.vault.binaries.size).toBe(0);
     expect(s.vault.files.get("语雀/标题A.md")).toContain("https://cdn.nlark.com/yuque/x.png");
+  });
+});
+
+/**
+ * 回归：配额耗尽（429）必须熔断，而不是当成单篇失败继续往下试。
+ * 旧实现对每个 429 走 5s/15s/30s 退避（50s）后才抛错，且 catch 通配后继续下一篇——
+ * 402 篇的库会变成约 5.6 小时的纯空转，用户看到的是「卡住不动」。
+ */
+describe("syncTask · 配额耗尽熔断", () => {
+  const detail = (s: ReturnType<typeof setup>, slug: string): YuqueDocDetail => {
+    const d = s.docs.find((x) => x.slug === slug)!;
+    return { ...d, body: (s.bodies[slug] as string) ?? "" };
+  };
+
+  it("拉取中途配额用尽：停止继续拉取，但已拉到的文档照常写入并落盘", async () => {
+    const s = setup({
+      docs: [doc("a", "标题A", "t1"), doc("b", "标题B", "t1"), doc("c", "标题C", "t1")],
+      bodies: { a: "正文A", b: "正文B", c: "正文C" },
+    });
+    s.api.getDoc.mockImplementation(async (_ns: string, slug: string) => {
+      if (slug !== "a") throw new YuqueQuotaError(`/repos/ns/docs/${slug}`);
+      return detail(s, slug);
+    });
+
+    const outcome = await s.run();
+
+    expect(outcome.stop).toBe("quota");
+    expect(outcome.remainingDocs).toBe(2);
+    // 只试了两篇：第三篇不再触碰（这就是旧实现空转 5.6 小时的病根）
+    expect(s.api.getDoc).toHaveBeenCalledTimes(2);
+    // 已拉到的照常写入并落盘，下次同步自动跳过
+    expect(notePaths(s.vault)).toEqual(["语雀/标题A.md"]);
+    expect(state(s)["ns/a"]?.updatedAt).toBe("t1");
+    // 未拉到的两篇不留记录，下次会重试
+    expect(state(s)["ns/b"]).toBeUndefined();
+    expect(state(s)["ns/c"]).toBeUndefined();
+    expect(s.logs.some((l) => l.includes("配额已用尽"))).toBe(true);
+    // 不能说「完成」——否则用户以为同步跑完了
+    expect(s.logs.some((l) => l.includes("完成："))).toBe(false);
+    expect(s.logs.some((l) => l.includes("因配额用尽中止"))).toBe(true);
+  });
+
+  it("对照：普通单篇失败仍然跳过继续，不被熔断逻辑误伤", async () => {
+    const s = setup({
+      docs: [doc("a", "标题A", "t1"), doc("b", "标题B", "t1")],
+      bodies: { a: "正文A", b: "正文B" },
+    });
+    s.api.getDoc.mockImplementation(async (_ns: string, slug: string) => {
+      if (slug === "a") throw new Error("网络抖动");
+      return detail(s, slug);
+    });
+
+    const outcome = await s.run();
+
+    expect(outcome.stop).toBe("done");
+    expect(s.api.getDoc).toHaveBeenCalledTimes(2);
+    expect(notePaths(s.vault)).toEqual(["语雀/标题B.md"]);
+    expect(s.logs.some((l) => l.includes("拉取失败「标题A」"))).toBe(true);
+  });
+});
+
+/**
+ * 请求预算：任务边界的软停。
+ *
+ * 与 429 熔断的关键区别：这是**主动**收工，不是撞墙——所以日志不能标红、也不能说「完成」。
+ * 核心保证是「要么这个库完整同步、要么它根本不开始」，不会留下「目录索引页只覆盖一半」
+ * 或「正文只写了一半」的半拉子状态。
+ */
+describe("syncTask · 请求预算软停", () => {
+  it("预算不够跑完本任务：一篇都不拉，文件零改动", async () => {
+    const s = setup({
+      docs: [doc("a", "标题A", "t1"), doc("b", "标题B", "t1")],
+      bodies: { a: "正文A", b: "正文B" },
+      budget: 1,
+      usedThisRun: 2, // 已用掉 TOC + 文档列表 → 可用 0
+    });
+
+    const outcome = await s.run();
+
+    expect(outcome.stop).toBe("budget");
+    expect(outcome.remainingDocs).toBe(2);
+    expect(s.api.getDoc).not.toHaveBeenCalled();
+    expect(notePaths(s.vault)).toEqual([]);
+    expect(s.logs.some((l) => l.includes("本任务暂不开始拉取"))).toBe(true);
+    expect(s.logs.some((l) => l.includes("按请求预算收工"))).toBe(true);
+    // 主动收工不是错误，但同样不能说「完成」——还有两篇没拉
+    expect(s.logs.some((l) => l.includes("完成："))).toBe(false);
+  });
+
+  it("预算够：正常跑完，stop 为 done", async () => {
+    const s = setup({
+      docs: [doc("a", "标题A", "t1")],
+      bodies: { a: "正文A" },
+      budget: 10,
+      usedThisRun: 2,
+    });
+
+    const outcome = await s.run();
+
+    expect(outcome.stop).toBe("done");
+    expect(notePaths(s.vault)).toEqual(["语雀/标题A.md"]);
+  });
+
+  it("响应头给出剩余额度时优先按它判：剩余 0 → 不开跑", async () => {
+    const s = setup({
+      docs: [doc("a", "标题A", "t1")],
+      bodies: { a: "正文A" },
+      headerRemaining: 0,
+    });
+
+    const outcome = await s.run();
+
+    expect(outcome.stop).toBe("budget");
+    expect(s.api.getDoc).not.toHaveBeenCalled();
+  });
+
+  it("无需更新的库即使预算为 0 也不被软停误伤（否则会连带跳过目录索引重画）", async () => {
+    const s = setup({
+      docs: [doc("a", "标题A", "t1")],
+      state: {
+        "ns/a": {
+          updatedAt: "t1",
+          path: "语雀/标题A",
+          url: "u",
+          title: "标题A",
+          hash: "h",
+          folder: null,
+        },
+      },
+      budget: 1,
+      usedThisRun: 99,
+    });
+    s.vault.files.set("语雀/标题A.md", "旧内容");
+
+    const outcome = await s.run();
+
+    expect(outcome.stop).toBe("done");
+    expect(s.api.getDoc).not.toHaveBeenCalled();
   });
 });

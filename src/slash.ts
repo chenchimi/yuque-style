@@ -4,10 +4,10 @@ import {
   EditorSuggest,
   EditorSuggestContext,
   EditorSuggestTriggerInfo,
-  Notice,
   TFile,
 } from "obsidian";
 import type { YuqueStylePlugin } from "./main";
+import { applySlashItem } from "./rich-ui";
 import { filterSlashItems, ITEMS, type SlashItem } from "./slash-items";
 
 /**
@@ -58,29 +58,14 @@ export class YuqueSlashSuggest extends EditorSuggest<SlashItem> {
   onChooseSuggestion(item: SlashItem, _evt: MouseEvent | KeyboardEvent): void {
     const ctx = this.context;
     if (!ctx) return;
-    const text = item.resolve
-      ? item.resolve({ file: ctx.file, app: this.plugin.app })
-      : item.insert;
-    if (text === null) {
-      new Notice(item.emptyHint ?? "无法插入该内容");
-      return;
-    }
-
-    const editor = ctx.editor;
-    const startOffset = editor.posToOffset(ctx.start);
-    editor.replaceRange(text, ctx.start, ctx.end);
-
-    // 有占位文本时选中它，用户直接打字即可替换
-    if (item.selectText) {
-      const at = text.indexOf(item.selectText);
-      if (at >= 0) {
-        editor.setSelection(
-          editor.offsetToPos(startOffset + at),
-          editor.offsetToPos(startOffset + at + item.selectText.length),
-        );
-        return;
-      }
-    }
-    editor.setCursor(editor.offsetToPos(startOffset + text.length - item.cursorBack));
+    // 插入落地逻辑与顶部工具栏的「插入」下拉共用一份（rich-ui.applySlashItem）
+    applySlashItem({
+      app: this.plugin.app,
+      editor: ctx.editor,
+      item,
+      file: ctx.file,
+      start: ctx.start,
+      end: ctx.end,
+    });
   }
 }

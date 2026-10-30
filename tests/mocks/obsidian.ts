@@ -70,7 +70,47 @@ export class Notice {
   hide(): void {}
 }
 
-/** 网络出口：默认直接失败，避免测试意外打到真实语雀 API */
-export function requestUrl(): never {
-  throw new Error("requestUrl 未实现：测试不应发起真实网络请求，请注入假的 YuqueApi");
+/**
+ * 网络出口：默认直接失败，避免测试意外打到真实语雀 API。
+ * 需要测网络层逻辑（api.ts 的节流/429 熔断等）时，
+ * 用 `setRequestUrlHandler` 注入假实现，用完记得 `resetRequestUrlHandler` 还原。
+ */
+let requestUrlHandler: ((opts: unknown) => unknown) | null = null;
+
+export function setRequestUrlHandler(fn: (opts: unknown) => unknown): void {
+  requestUrlHandler = fn;
+}
+
+export function resetRequestUrlHandler(): void {
+  requestUrlHandler = null;
+}
+
+export function requestUrl(opts: unknown): unknown {
+  if (!requestUrlHandler) {
+    throw new Error("requestUrl 未实现：测试不应发起真实网络请求，请注入假的 YuqueApi");
+  }
+  return requestUrlHandler(opts);
+}
+
+/**
+ * 弹窗基类替身：只为让 `class X extends Modal` 的模块在 Node 下完成求值
+ * （真实 obsidian 包没有可执行 JS，缺它时模块加载即抛
+ * 「Class extends value undefined」）。元素字段用 jsdom 现造，
+ * 交互方法留空——需要断言弹窗行为的测试按需在替身之上覆写。
+ */
+export class Modal {
+  contentEl: HTMLElement;
+  titleEl: HTMLElement;
+  modalEl: HTMLElement;
+
+  constructor(_app?: unknown) {
+    this.contentEl = document.createElement("div");
+    this.titleEl = document.createElement("div");
+    this.modalEl = document.createElement("div");
+  }
+
+  open(): void {}
+  close(): void {}
+  onOpen(): void {}
+  onClose(): void {}
 }

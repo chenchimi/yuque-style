@@ -447,8 +447,9 @@ class LakeConverter {
           return new LakeConverter().convert(html).markdown.trim();
         }
         if (Array.isArray(value.items)) {
-          return value.items
-            .map((it: any) => `- [${it.checked ? "x" : " "}] ${it.title || ""}`)
+          const items = value.items as { checked?: boolean | string; title?: string }[];
+          return items
+            .map((it) => `- [${it.checked ? "x" : " "}] ${it.title || ""}`)
             .join("\n");
         }
         return null;

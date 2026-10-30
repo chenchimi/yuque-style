@@ -35,6 +35,206 @@
   color: var(--text-accent);
 }
 
+/* ---------- 文档顶部：固定工具栏 + 元信息行 ---------- */
+/* 关键在「放在滚动容器外面」：编辑区的滚动发生在内部的 .cm-scroller（阅读模式是
+   .markdown-preview-view），把内容区改成纵向 flex、顶栏做第一个子项，
+   它就天然不随内容滚动，比在嵌套滚动容器里赌 position: sticky 稳。 */
+.workspace-leaf-content .view-content.yuque-has-topbar {
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace-leaf-content .view-content.yuque-has-topbar > .markdown-source-view,
+.workspace-leaf-content .view-content.yuque-has-topbar > .markdown-preview-view {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.yuque-topbar {
+  flex: 0 0 auto;
+  z-index: 20;
+  background: var(--background-primary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  user-select: none;
+}
+
+/* 关掉开关、或在阅读模式（那边由「文档头信息」承担元信息）时整条隐去 */
+.yuque-topbar.yuque-topbar-hidden {
+  display: none;
+}
+
+.yuque-topbar-tools {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+}
+
+/* 按钮排：窄屏与移动端横向滚动，而不是换行把顶栏撑成两行 */
+.yuque-topbar-tools-scroll {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.yuque-topbar-tools-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.yuque-topbar-collapsed .yuque-topbar-tools-scroll {
+  display: none;
+}
+
+.yuque-topbar-btn {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 30px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.yuque-topbar-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.yuque-topbar-btn svg {
+  width: 17px;
+  height: 17px;
+}
+
+/* 段落样式（正文 / 标题 N / 引用块）：宽度留够，免得「标题 6」被截断 */
+.yuque-topbar-style {
+  min-width: 68px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.yuque-topbar-sep {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 18px;
+  margin: 0 6px;
+  background: var(--background-modifier-border);
+}
+
+.yuque-topbar-collapse {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-left: 4px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.yuque-topbar-collapse:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.yuque-topbar-collapse svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* 元信息行：标题 + 最近编辑 / 字数 / 阅读时长 / 同步状态 */
+.yuque-topbar-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 10px 7px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.yuque-topbar-title {
+  overflow: hidden;
+  font-weight: 600;
+  color: var(--text-normal);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yuque-topbar-chips {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.yuque-topbar-chip {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.yuque-topbar-chip-label {
+  color: var(--text-faint);
+}
+
+/* 同步状态位（「协作状态」）：圆点颜色区分「语雀同步下来的」与「本地新增」 */
+.yuque-topbar-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.yuque-topbar-sync.is-yuque .yuque-topbar-dot {
+  background: var(--text-success, #43a047);
+}
+
+.yuque-topbar-sync.is-clickable {
+  cursor: pointer;
+}
+
+.yuque-topbar-sync.is-clickable:hover .yuque-topbar-chip-value {
+  color: var(--text-accent);
+  text-decoration: underline;
+}
+
+/* 移动端：收紧间距、缩小按钮，让工具栏一屏放得下更多 */
+.is-mobile .yuque-topbar-tools {
+  padding: 2px 6px;
+}
+
+.is-mobile .yuque-topbar-btn {
+  min-width: 30px;
+  height: 28px;
+}
+
+.is-mobile .yuque-topbar-meta {
+  gap: 10px;
+  padding-bottom: 6px;
+}
+
+/* 窄屏：元信息行只留最关键的几项，避免挤成一片 */
+@media (max-width: 700px) {
+  .yuque-topbar-chips .yuque-topbar-chip-plain {
+    display: none;
+  }
+}
+
 /* 文字颜色色板 */
 .yuque-color-grid {
   display: flex;
@@ -343,9 +543,161 @@
 }
 
 
+/* ============ 设置页 ============ */
+/* 简介卡片：设置页顶部说明「这插件是干什么的」 */
+.yuque-settings .yuque-settings-intro {
+  padding: 14px 16px;
+  margin-bottom: 24px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-secondary);
+}
+
+.yuque-settings .yuque-settings-intro-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 1.1em;
+}
+
+.yuque-settings .yuque-settings-version {
+  font-size: 0.8em;
+  color: var(--text-faint);
+}
+
+.yuque-settings .yuque-settings-intro-desc {
+  margin: 6px 0 8px;
+  color: var(--text-muted);
+}
+
+.yuque-settings .yuque-settings-intro-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-muted);
+  font-size: 0.92em;
+}
+
+.yuque-settings .yuque-settings-intro-list li {
+  margin: 2px 0;
+}
+
+/* 分组标题之间留一点呼吸，长页面里更好定位 */
+.yuque-settings h2 {
+  margin-top: 28px;
+}
+
+/* ============ 同步任务管理弹窗 ============ */
+.yuque-task-list {
+  max-height: 380px;
+  overflow-y: auto;
+  margin: 8px 0 12px;
+}
+
+.yuque-task-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+
+.yuque-task-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.yuque-task-info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.yuque-task-name {
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.yuque-task-desc {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 0.85em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yuque-task-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+/* ============ 图片灯箱（阅读模式点击放大） ============ */
+/* 正文里的图片提示可点（yuque-reader 同时打在阅读模式与实时预览容器上） */
+.yuque-reader img {
+  cursor: zoom-in;
+}
+
+/* 全屏遮罩 + 原图。点击任意处或 Esc 关闭（行为在 lightbox.ts） */
+#yuque-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: var(--layer-modal, 100);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.78);
+  cursor: zoom-out;
+  animation: yuque-lightbox-in 0.15s ease-out;
+}
+
+#yuque-lightbox img {
+  max-width: 95vw;
+  max-height: 95vh;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.4);
+}
+
+@keyframes yuque-lightbox-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ============ 文件浏览器：语雀同步文档标记 ============ */
+/* 行尾小圆点。新旧两套 DOM 都覆盖：旧版条目内容在 .nav-file-title-content，
+   新版（tree）在 .tree-item-self 下的 .tree-item-inner（标记类打在条目自身上） */
+.yuque-synced-doc > .nav-file-title-content::after,
+.yuque-synced-doc > .tree-item-inner::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-success, #4caf7d);
+  margin-left: 6px;
+  vertical-align: middle;
+  flex: 0 0 auto;
+}
+
 /* ============ 语雀同步 ============ */
 .yuque-sync-modal .modal-content {
   padding: 12px 16px 16px;
+}
+
+/* 孤儿文档清理确认窗 */
+.yuque-orphan-list {
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 8px 0 12px;
+  padding-left: 22px;
+  font-size: 0.9em;
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+
+.yuque-orphan-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .yuque-sync-log {

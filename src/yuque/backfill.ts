@@ -1,6 +1,6 @@
 import { Notice, TFile } from "obsidian";
 import type { YuqueStylePlugin } from "../main";
-import { YuqueApi, type YuqueDocSummary } from "./api";
+import { type YuqueDocSummary } from "./api";
 import { ensureFrontmatterFields, FM, yuqueTagNames } from "./frontmatter";
 import { stripMd } from "./link";
 import { hashContent, stateKey } from "./state";
@@ -67,7 +67,7 @@ export async function backfillMetadata(
     return stats;
   }
 
-  const api = new YuqueApi(settings.yuqueToken);
+  const api = plugin.createApi();
   log("只调文档列表接口（每 100 篇 1 次请求），不拉正文、不动图片。");
 
   // 1) 取各知识库的文档列表

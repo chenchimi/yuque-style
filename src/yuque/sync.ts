@@ -1,5 +1,5 @@
 import { App, normalizePath, TFile, TFolder } from "obsidian";
-import { YuqueApi, YuqueDocSummary, YuqueTocNode } from "./api";
+import { isQuotaExhausted, YuqueApi, YuqueDocSummary, YuqueTocNode } from "./api";
 import { convertYuqueBody, type ColorMode } from "./lake";
 import { propertiesBlock, FM, yuqueTagNames } from "./frontmatter";
 import {
@@ -20,7 +20,10 @@ import {
   countBasenames,
   mergeStateIntoIndex,
 } from "./link";
+import type { LinkIndex } from "./link";
 import type { YuqueStylePlugin } from "../main";
+import type { YuqueSyncState } from "./state";
+import { budgetSourceLabel, decideBudget } from "./rate";
 
 export type SyncLogFn = (msg: string, type?: "info" | "success" | "error") => void;
 
@@ -205,21 +208,41 @@ async function pruneBackups(app: App, dir: string): Promise<void> {
 }
 
 /**
- * 同步单个任务：拉取文档 → Lake 转 Markdown → 内链改写 → 图片本地化 → 写入 vault。
- * 增量策略：settings.yuqueSyncState 中记录的 updatedAt 与列表一致、且记录的本地文件仍存在则跳过。
+ * syncTask 的结束原因。
+ * - `done`：本任务已完成（可能一篇都没变，也可能全量写完）；
+ * - `quota`：撞上 429，被动熔断——**异常**，上层要立即停掉后续任务；
+ * - `budget`：本次运行的请求预算不够跑完本任务，主动收工——**正常**，不是错误；
+ * - `aborted`：用户点了「停止」。
+ *
+ * 后三种都要让上层停掉后续任务（继续跑只会白砸额度或继续被用户中止）。
  */
-export async function syncTask(
-  plugin: YuqueStylePlugin,
+export type SyncStopReason = "done" | "quota" | "budget" | "aborted";
+
+export interface SyncTaskOutcome {
+  stop: SyncStopReason;
+  /** 本次未拉取的文档数（quota / budget / aborted 中止时 > 0） */
+  remainingDocs: number;
+}
+
+// ============ syncTask 的阶段函数 ============
+// 原先是 520 行的单一函数，现按执行阶段拆分；只搬移代码、不改任何行为。
+
+/** 待拉取清单项。连解析出的本地路径一起带下去：写入阶段必须复用它，
+ * 否则用户重命名后会被按「目标文件夹 + 标题」重新算回旧路径，又建出一份重复文件。 */
+interface PendingDoc {
+  doc: YuqueDocSummary;
+  basePath: string;
+  folder: string | null;
+}
+
+/** 拉取 TOC 与文档列表，含两重取数兜底（TOC 里的 namespace / 知识库 ID） */
+async function fetchTocAndDocs(
   api: YuqueApi,
   task: YuqueSyncTaskType,
+  retryLog: (waitSec: number, attempt: number) => void,
   log: SyncLogFn,
-  signal?: AbortSignal,
-): Promise<void> {
-  const settings = plugin.settings;
+): Promise<{ toc: YuqueTocNode[]; docList: YuqueDocSummary[] }> {
   const ns = task.namespace;
-  const retryLog: (waitSec: number, attempt: number) => void = (waitSec, attempt) =>
-    log(`语雀 API 限流，${waitSec} 秒后自动重试（第 ${attempt} 次）…`);
-
   log(`正在获取知识库目录「${task.repoName}」…`);
   let toc = await api.getToc(ns, retryLog);
   let docList = await api.getDocListOnce(ns);
@@ -255,77 +278,78 @@ export async function syncTask(
     }
   }
 
-  const tocFolders = buildTocFolders(toc);
-  log(`目录（TOC）节点数：${toc.length}`);
+  return { toc, docList };
+}
 
-  const docBySlug = new Map<string, YuqueDocSummary>();
-  for (const d of docList) docBySlug.set(d.slug, d);
-
-  if (docList.length === 0 && toc.length > 0) {
-    // 兜底：直接用 TOC 中的 DOC 节点构造文档清单（无 updated_at，全部视为待更新）
-    const tocDocs: YuqueDocSummary[] = toc
-      .filter((n) => n.type === "DOC" && n.slug)
-      .map((n) => ({
-        id: 0,
-        slug: n.slug!,
-        title: n.title,
-        updated_at: "",
-      }));
-    if (tocDocs.length > 0) {
-      log(`文档列表为空，改按目录节点同步 ${tocDocs.length} 篇文档…`);
-      for (const d of tocDocs) {
-        if (!docBySlug.has(d.slug)) {
-          docBySlug.set(d.slug, d);
-          docList.push(d); // 必须进 docList，否则 targets 不会包含它们
-        }
+/** 文档列表为空但 TOC 有内容：直接用 TOC 中的 DOC 节点构造清单
+ * （无 updated_at，全部视为待更新）。会原地修改 docList 与 docBySlug。 */
+function applyTocFallback(
+  toc: YuqueTocNode[],
+  docList: YuqueDocSummary[],
+  docBySlug: Map<string, YuqueDocSummary>,
+  log: SyncLogFn,
+): void {
+  const tocDocs: YuqueDocSummary[] = toc
+    .filter((n) => n.type === "DOC" && n.slug)
+    .map((n) => ({
+      id: 0,
+      slug: n.slug!,
+      title: n.title,
+      updated_at: "",
+    }));
+  if (tocDocs.length > 0) {
+    log(`文档列表为空，改按目录节点同步 ${tocDocs.length} 篇文档…`);
+    for (const d of tocDocs) {
+      if (!docBySlug.has(d.slug)) {
+        docBySlug.set(d.slug, d);
+        docList.push(d); // 必须进 docList，否则 targets 不会包含它们
       }
     }
   }
+}
 
-  if (docList.length === 0) {
-    log(
-      `⚠ 目录与文档列表均为空：「${task.repoName}」可能是空知识库，或 Token 无权读取它。` +
-        `请确认该知识库在语雀网页中确实有文档，且 Token 勾选了读取权限`,
-      "error",
-    );
-  }
-
-  // 确定同步目标
-  let targets: YuqueDocSummary[];
+/** 确定同步目标：按篇勾选的任务按清单；整个库的按 TOC 顺序（未入目录的排最后） */
+function resolveTargets(
+  task: YuqueSyncTaskType,
+  toc: YuqueTocNode[],
+  docList: YuqueDocSummary[],
+  docBySlug: Map<string, YuqueDocSummary>,
+  log: SyncLogFn,
+): YuqueDocSummary[] {
   if (task.mode === "selected") {
-    targets = task.selectedDocs
+    const targets = task.selectedDocs
       .map((sd) => docBySlug.get(sd.slug))
       .filter((d): d is YuqueDocSummary => !!d);
     const missing = task.selectedDocs.filter((sd) => !docBySlug.has(sd.slug));
     if (missing.length > 0) log(`警告：${missing.length} 篇所选文档已不存在`, "error");
-  } else {
-    // 按语雀目录树（TOC）顺序排列，与语雀左侧目录一致；
-    // 不在目录中的文档（草稿/未加入目录）排在最后
-    const tocOrder = new Map<string, number>();
-    toc.forEach((n, i) => {
-      if (n.slug && !tocOrder.has(n.slug)) tocOrder.set(n.slug, i);
-    });
-    const inToc: YuqueDocSummary[] = [];
-    const notInToc: YuqueDocSummary[] = [];
-    for (const d of docList) (tocOrder.has(d.slug) ? inToc : notInToc).push(d);
-    inToc.sort((a, b) => (tocOrder.get(a.slug) ?? 0) - (tocOrder.get(b.slug) ?? 0));
-    targets = [...inToc, ...notInToc];
-    if (notInToc.length > 0) log(`${notInToc.length} 篇文档未加入语雀目录，排在最后`);
+    return targets;
   }
+  // 按语雀目录树（TOC）顺序排列，与语雀左侧目录一致；
+  // 不在目录中的文档（草稿/未加入目录）排在最后
+  const tocOrder = new Map<string, number>();
+  toc.forEach((n, i) => {
+    if (n.slug && !tocOrder.has(n.slug)) tocOrder.set(n.slug, i);
+  });
+  const inToc: YuqueDocSummary[] = [];
+  const notInToc: YuqueDocSummary[] = [];
+  for (const d of docList) (tocOrder.has(d.slug) ? inToc : notInToc).push(d);
+  inToc.sort((a, b) => (tocOrder.get(a.slug) ?? 0) - (tocOrder.get(b.slug) ?? 0));
+  if (notInToc.length > 0) log(`${notInToc.length} 篇文档未加入语雀目录，排在最后`);
+  return [...inToc, ...notInToc];
+}
 
-  // 增量过滤
-  const state = settings.yuqueSyncState || {};
-  // 落盘必须随时可做：中断或异常时若丢掉已写入文件的 hash，
-  // 下次它们会被判成「本地被改过」而白白触发一次保守备份
-  const persistState = async (): Promise<void> => {
-    settings.yuqueSyncState = state;
-    await plugin.saveSettings();
-  };
-  // 语雀彩色文字落到 Markdown 的方式；默认 drop（不输出 HTML，编辑/阅读两种模式都不见源码）
-  const colorMode: ColorMode = settings.yuqueTextColor || "drop";
-  // 连解析出的本地路径一起带下去：写入阶段必须复用它。
-  // 否则用户重命名后会被按「目标文件夹 + 标题」重新算回旧路径，又建出一份重复文件。
-  const pending: { doc: YuqueDocSummary; basePath: string; folder: string | null }[] = [];
+/** 增量判定 + 分组跟随：算出每篇的本地路径，需要拉取的进 pending，
+ * 语雀端分组改名的把文件搬过去（正文没变，无需重新拉取）。 */
+async function planPending(
+  plugin: YuqueStylePlugin,
+  task: YuqueSyncTaskType,
+  ns: string,
+  state: YuqueSyncState,
+  tocFolders: Map<string, string>,
+  targets: YuqueDocSummary[],
+  log: SyncLogFn,
+): Promise<{ pending: PendingDoc[]; skipped: number; relocated: number }> {
+  const pending: PendingDoc[] = [];
   let skipped = 0;
   let relocated = 0;
   for (const d of targets) {
@@ -397,16 +421,41 @@ export async function syncTask(
     }
     pending.push({ doc: d, basePath: resolvedPath, folder });
   }
-  log(`共 ${targets.length} 篇，需更新 ${pending.length} 篇，跳过未变化 ${skipped} 篇`);
+  return { pending, skipped, relocated };
+}
 
-  // 拉取并转换
+/** 拉取正文 → Lake 转 Markdown → 拼前言区。配额耗尽立即熔断（停拉不停写）。 */
+async function fetchAndStage(
+  api: YuqueApi,
+  ns: string,
+  pending: PendingDoc[],
+  colorMode: ColorMode,
+  budgetStopped: boolean,
+  log: SyncLogFn,
+  signal: AbortSignal | undefined,
+  persistState: () => Promise<void>,
+): Promise<{
+  staged: StagedDoc[];
+  quotaExhausted: boolean;
+  quotaRemaining: number;
+  aborted: SyncTaskOutcome | null;
+}> {
   const staged: StagedDoc[] = [];
+  // 配额耗尽标记：一旦为真，本次不再拉取，但下面仍会写出已拉到的文档并落盘记录
+  let quotaExhausted = false;
+  let quotaRemaining = 0;
   for (const { doc: d, basePath, folder } of pending) {
     if (signal?.aborted) {
       log("已停止；正在保存已同步记录…");
       await persistState();
-      return;
+      return {
+        staged,
+        quotaExhausted,
+        quotaRemaining,
+        aborted: { stop: "aborted", remainingDocs: pending.length - staged.length },
+      };
     }
+    if (quotaExhausted || budgetStopped) break;
     try {
       const detail = await api.getDoc(ns, d.slug);
       const result = convertYuqueBody(detail.body || "", colorMode);
@@ -431,24 +480,41 @@ export async function syncTask(
       });
       for (const w of result.warnings) log(`  ⚠ ${d.title}：${w}`);
     } catch (e) {
+      // 配额耗尽与「单篇拉取失败」必须分开处理：
+      // 前者是账号级的小时配额，继续对后面每一篇重试都是白等（旧实现 402 篇 ≈ 5.6 小时空转），
+      // 故立即熔断；后者才跳过单篇继续。
+      if (isQuotaExhausted(e)) {
+        quotaExhausted = true;
+        // 用「待拉取总数 - 已成功拉到数」而不是下标：本轮的失败篇也还没拿到，
+        // 且前面若有单篇失败同样没进 staged，用下标会少算。
+        quotaRemaining = pending.length - staged.length;
+        log((e as Error).message, "error");
+        log(
+          `⚠ 配额已用尽：已拉到 ${staged.length} 篇，剩余 ${quotaRemaining} 篇本次不再尝试。` +
+            `下面会把已拉到的内容正常写入并保存记录。`,
+          "error",
+        );
+        break;
+      }
       log(`拉取失败「${d.title}」：${(e as Error).message}`, "error");
     }
   }
-  if (staged.length === 0) {
-    // 不在这里提前返回：即使一篇正文都不用写，本次也可能刚为旧记录补全了 path、
-    // 或跟随了语雀端的分组改名，目录索引页同样要按新分组重画。
-    // 记录落盘与索引页生成都在函数末尾统一处理。
-    log("没有需要写入的文档", "info");
-  }
+  return { staged, quotaExhausted, quotaRemaining, aborted: null };
+}
 
-  // 内部链接 → Obsidian 双链。
-  // 解析范围是整个 vault（语雀里跨知识库引用很常见），映射表来自每篇文档 frontmatter 的
-  // source 字段并上同步记录——故意不依赖同步状态，否则「清除增量同步记录」后表会全空。
-  const slugToTitle = new Map<string, string>();
-  for (const t of targets) slugToTitle.set(t.slug, sanitizeFileName(t.title));
+/** 内部链接 → Obsidian 双链。
+ * 解析范围是整个 vault（语雀里跨知识库引用很常见），映射表来自每篇文档 frontmatter 的
+ * source 字段并上同步记录——故意不依赖同步状态，否则「清除增量同步记录」后表会全空。 */
+function convertInternalLinks(
+  plugin: YuqueStylePlugin,
+  ns: string,
+  pending: PendingDoc[],
+  staged: StagedDoc[],
+  log: SyncLogFn,
+): { linkIndex: LinkIndex; linkCounts: Map<string, number>; linksConverted: number } {
   const vaultDocs = collectVaultDocs(plugin.app);
   const linkIndex = buildLinkIndex(vaultDocs);
-  mergeStateIntoIndex(linkIndex, settings.yuqueSyncState);
+  mergeStateIntoIndex(linkIndex, plugin.settings.yuqueSyncState);
   const extraNames: string[] = [];
   // 本次要写入的文档也进索引：首次同步时 A→B 的引用同样能转（B 此刻还没落盘）
   for (const { doc: pendingDoc, basePath } of pending) {
@@ -468,51 +534,74 @@ export async function syncTask(
     doc.content = converted.content;
     linksConverted += converted.converted;
   }
-  if (linksConverted > 0) {
-    log(`已把 ${linksConverted} 条语雀文档链接转为本地双链`);
-  }
+  return { linkIndex, linkCounts, linksConverted };
 
-  // 图片本地化
-  if (settings.yuqueDownloadImages) {
-    const assetsRoot = joinPath(task.targetFolder, settings.yuqueAssetsFolder || "assets");
-    await ensureFolder(plugin.app, assetsRoot);
-    let done = 0;
-    for (const doc of staged) {
-      const matches = Array.from(doc.content.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
-      for (const m of matches) {
-        const [full, alt, url] = m;
-        if (!/yuque|nlark|alicdn/.test(url)) continue; // 仅下载语雀系 CDN
-        const ext = imageExtFromUrl(url);
-        const fileName = `yuque-${hashUrl(url)}.${ext}`;
-        const assetPath = `${assetsRoot}/${fileName}`;
-        try {
-          if (!(await plugin.app.vault.adapter.exists(assetPath))) {
-            const buf = await api.downloadBinary(url);
-            await plugin.app.vault.adapter.writeBinary(assetPath, buf);
-          }
-          // 相对路径（相对 md 文件所在目录）
-          const docFolder = doc.basePath.includes("/")
-            ? doc.basePath.slice(0, doc.basePath.lastIndexOf("/"))
-            : "";
-          let rel = normalizePath(assetsRoot);
-          if (docFolder) {
-            const up = docFolder.split("/").length;
-            rel = "../".repeat(up) + assetsRoot;
-          }
-          rel = normalizePath(rel) + "/" + fileName;
-          doc.content = doc.content
-            .split(full)
-            .join(`![${alt}](${encodeLinkTarget(rel)})`);
-          done++;
-        } catch (e) {
-          log(`  ⚠ 图片下载失败（保留远程链接）：${(e as Error).message}`, "error");
+}
+
+/** 图片本地化：只下载语雀系 CDN 的图，已存在的不重复下载，失败保留远程链接 */
+async function localizeImages(
+  plugin: YuqueStylePlugin,
+  api: YuqueApi,
+  task: YuqueSyncTaskType,
+  staged: StagedDoc[],
+  log: SyncLogFn,
+): Promise<void> {
+  const assetsRoot = joinPath(task.targetFolder, plugin.settings.yuqueAssetsFolder || "assets");
+  await ensureFolder(plugin.app, assetsRoot);
+  let done = 0;
+  for (const doc of staged) {
+    const matches = Array.from(doc.content.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
+    for (const m of matches) {
+      const [full, alt, url] = m;
+      if (!/yuque|nlark|alicdn/.test(url)) continue; // 仅下载语雀系 CDN
+      const ext = imageExtFromUrl(url);
+      const fileName = `yuque-${hashUrl(url)}.${ext}`;
+      const assetPath = `${assetsRoot}/${fileName}`;
+      try {
+        if (!(await plugin.app.vault.adapter.exists(assetPath))) {
+          const buf = await api.downloadBinary(url);
+          await plugin.app.vault.adapter.writeBinary(assetPath, buf);
         }
+        // 相对路径（相对 md 文件所在目录）
+        const docFolder = doc.basePath.includes("/")
+          ? doc.basePath.slice(0, doc.basePath.lastIndexOf("/"))
+          : "";
+        let rel = normalizePath(assetsRoot);
+        if (docFolder) {
+          const up = docFolder.split("/").length;
+          rel = "../".repeat(up) + assetsRoot;
+        }
+        rel = normalizePath(rel) + "/" + fileName;
+        doc.content = doc.content
+          .split(full)
+          .join(`![${alt}](${encodeLinkTarget(rel)})`);
+        done++;
+      } catch (e) {
+        log(`  ⚠ 图片下载失败（保留远程链接）：${(e as Error).message}`, "error");
       }
     }
-    if (done > 0) log(`已本地化 ${done} 张图片 → ${assetsRoot}/`);
   }
+  if (done > 0) log(`已本地化 ${done} 张图片 → ${assetsRoot}/`);
+}
 
-  // 写入文件
+/** 写入 vault：旧位置跟随、重复拷贝警告、冲突备份、内容一致跳过 */
+async function writeStaged(
+  plugin: YuqueStylePlugin,
+  task: YuqueSyncTaskType,
+  ns: string,
+  state: YuqueSyncState,
+  staged: StagedDoc[],
+  quotaRemaining: number,
+  log: SyncLogFn,
+  signal: AbortSignal | undefined,
+  persistState: () => Promise<void>,
+): Promise<{
+  written: number;
+  unchanged: number;
+  backedUp: number;
+  moved: number;
+  aborted: SyncTaskOutcome | null;
+}> {
   let written = 0;
   let unchanged = 0;
   let backedUp = 0;
@@ -521,7 +610,13 @@ export async function syncTask(
     if (signal?.aborted) {
       log(`已停止；已写入 ${written} 篇，正在保存记录…`);
       await persistState();
-      return;
+      return {
+        written,
+        unchanged,
+        backedUp,
+        moved,
+        aborted: { stop: "aborted", remainingDocs: quotaRemaining },
+      };
     }
     const filePath = `${doc.basePath}.md`;
     try {
@@ -573,7 +668,7 @@ export async function syncTask(
         nextContent: doc.content,
         knownHash: state[key]?.hash,
       });
-      if (decision === "backup-overwrite" && settings.yuqueBackupOnConflict) {
+      if (decision === "backup-overwrite" && plugin.settings.yuqueBackupOnConflict) {
         const backupPath = await backupDocFile(plugin.app, ns, doc, current ?? "");
         log(`「${doc.title}」本地已改动，备份原内容 → ${backupPath}`);
         backedUp++;
@@ -600,70 +695,241 @@ export async function syncTask(
       log(`写入失败「${doc.title}」：${(e as Error).message}`, "error");
     }
   }
-  await persistState();
-  log(
-    `「${task.repoName}」完成：写入/更新 ${written} 篇` +
-      (unchanged > 0 ? `，内容未变 ${unchanged} 篇` : "") +
-      (relocated > 0 ? `，分组跟随语雀 ${relocated} 篇` : "") +
-      (moved > 0 ? `，位置跟随 ${moved} 篇` : "") +
-      (backedUp > 0 ? `，冲突备份 ${backedUp} 篇` : ""),
-    "success",
+  return { written, unchanged, backedUp, moved, aborted: null };
+}
+
+/** 生成/更新「XX 目录」索引页：按 TOC 原始顺序带层级缩进与双链，内容一致不写 */
+async function writeTocIndex(
+  plugin: YuqueStylePlugin,
+  task: YuqueSyncTaskType,
+  ns: string,
+  toc: YuqueTocNode[],
+  targets: YuqueDocSummary[],
+  linkIndex: LinkIndex,
+  linkCounts: Map<string, number>,
+  log: SyncLogFn,
+): Promise<void> {
+  try {
+    const slugToTitle = new Map<string, string>();
+    for (const t of targets) slugToTitle.set(t.slug, sanitizeFileName(t.title));
+    const byUuid = new Map<string, YuqueTocNode>();
+    for (const n of toc) byUuid.set(n.uuid, n);
+    const lines: string[] = [`# ${task.repoName} · 知识库目录`, ""];
+    for (const n of toc) {
+      // 层级：沿 parent_uuid 数深度（TITLE 分组节点与 DOC 节点都算一层）
+      let depth = 0;
+      let cur: YuqueTocNode | undefined = n;
+      const guard = new Set<string>();
+      while (cur?.parent_uuid && !guard.has(cur.parent_uuid)) {
+        guard.add(cur.parent_uuid);
+        cur = byUuid.get(cur.parent_uuid);
+        depth++;
+      }
+      const indent = "  ".repeat(depth);
+      if (n.type === "DOC" && n.slug && slugToTitle.has(n.slug)) {
+        // 索引页点击最频繁，重名坑同样要按「唯一用短、撞车用路径」处理
+        const base = slugToTitle.get(n.slug)!;
+        const target = linkIndex.get(stateKey(ns, n.slug)) ?? { path: "", basename: base };
+        const unique = (linkCounts.get(target.basename) ?? 0) <= 1;
+        lines.push(`${indent}- ${buildInternalLink(target, n.title, unique)}`);
+      } else if (n.title) {
+        lines.push(`${indent}- **${n.title}**`);
+      }
+    }
+    const indexContent =
+      propertiesBlock({
+        [FM.title]: `${task.repoName} 知识库目录`,
+        [FM.source]: `https://www.yuque.com/${ns}`,
+      }) + `${lines.join("\n")}\n`;
+    const indexPath = joinPath(task.targetFolder, `${sanitizeFileName(task.repoName)} 目录.md`);
+    if (indexPath.includes("/")) {
+      await ensureFolder(plugin.app, indexPath.slice(0, indexPath.lastIndexOf("/")));
+    }
+    const existingIndex = plugin.app.vault.getAbstractFileByPath(indexPath);
+    let indexChanged = true;
+    if (existingIndex instanceof TFile) {
+      // 内容一致就不写：这篇索引现在每轮同步都会走到（哪怕一篇正文都没改），
+      // 无脑 modify 只会把它的修改时间无谓地刷新一遍
+      const previous = await plugin.app.vault.read(existingIndex);
+      indexChanged = previous !== indexContent;
+      if (indexChanged) await plugin.app.vault.modify(existingIndex, indexContent);
+    } else {
+      await plugin.app.vault.create(indexPath, indexContent);
+    }
+    if (indexChanged) log(`已更新知识库目录索引：${indexPath}`, "success");
+  } catch (e) {
+    log(`目录索引生成失败：${(e as Error).message}`, "error");
+  }
+}
+
+/**
+ * 同步单个任务：拉取文档 → Lake 转 Markdown → 内链改写 → 图片本地化 → 写入 vault。
+ * 增量策略：settings.yuqueSyncState 中记录的 updatedAt 与列表一致、且记录的本地文件仍存在则跳过。
+ * 配额耗尽时**只停止拉取**，已拉到的文档照常写入并落盘记录——下次同步自动从断点续跑。
+ */
+export async function syncTask(
+  plugin: YuqueStylePlugin,
+  api: YuqueApi,
+  task: YuqueSyncTaskType,
+  log: SyncLogFn,
+  signal?: AbortSignal,
+): Promise<SyncTaskOutcome> {
+  const settings = plugin.settings;
+  const ns = task.namespace;
+  const retryLog: (waitSec: number, attempt: number) => void = (waitSec, attempt) =>
+    log(`语雀 API 限流，${waitSec} 秒后自动重试（第 ${attempt} 次）…`);
+
+  const { toc, docList } = await fetchTocAndDocs(api, task, retryLog, log);
+
+  const tocFolders = buildTocFolders(toc);
+  log(`目录（TOC）节点数：${toc.length}`);
+
+  const docBySlug = new Map<string, YuqueDocSummary>();
+  for (const d of docList) docBySlug.set(d.slug, d);
+
+  if (docList.length === 0 && toc.length > 0) {
+    applyTocFallback(toc, docList, docBySlug, log);
+  }
+
+  if (docList.length === 0) {
+    log(
+      `⚠ 目录与文档列表均为空：「${task.repoName}」可能是空知识库，或 Token 无权读取它。` +
+        `请确认该知识库在语雀网页中确实有文档，且 Token 勾选了读取权限`,
+      "error",
+    );
+  }
+
+  const targets = resolveTargets(task, toc, docList, docBySlug, log);
+
+  // 增量过滤
+  const state = settings.yuqueSyncState || {};
+  // 落盘必须随时可做：中断或异常时若丢掉已写入文件的 hash，
+  // 下次它们会被判成「本地被改过」而白白触发一次保守备份
+  const persistState = async (): Promise<void> => {
+    settings.yuqueSyncState = state;
+    await plugin.saveSettings();
+  };
+  // 语雀彩色文字落到 Markdown 的方式；默认 drop（不输出 HTML，编辑/阅读两种模式都不见源码）
+  const colorMode: ColorMode = settings.yuqueTextColor || "drop";
+  // 连解析出的本地路径一起带下去：写入阶段必须复用它。
+  // 否则用户重命名后会被按「目标文件夹 + 标题」重新算回旧路径，又建出一份重复文件。
+  const { pending, skipped, relocated } = await planPending(
+    plugin,
+    task,
+    ns,
+    state,
+    tocFolders,
+    targets,
+    log,
   );
+  log(`共 ${targets.length} 篇，需更新 ${pending.length} 篇，跳过未变化 ${skipped} 篇`);
+
+  // ---- 请求预算：任务边界的软停 ----
+  // 只在「开始拉取本任务的正文之前」判定一次，从而保证「要么这个库完整同步、要么它根本不开始」——
+  // 不会出现目录索引页只覆盖一半、正文只写了一半的半拉子状态。
+  // 判据可精确计算：每篇正文各需 1 次请求；TOC 与文档列表的那 2 次此时已花掉、无法回避。
+  const budget = decideBudget({
+    setting: settings.yuqueRequestBudget ?? 0,
+    usedThisRun: api.requestCount ?? 0,
+    headerRemaining: api.remainingFromHeader ?? null,
+  });
+  let budgetStopped = false;
+  if (pending.length > 0 && budget.allowance !== null && pending.length > budget.allowance) {
+    budgetStopped = true;
+    log(
+      `⏸ 本任务暂不开始拉取：还需 ${pending.length} 次请求，本次可用 ${budget.allowance} 次` +
+        `（${budgetSourceLabel(budget.source)}）。已同步的内容保持完整，下次执行即可续跑。`,
+      "info",
+    );
+  }
+
+  // 拉取并转换
+  const fetched = await fetchAndStage(
+    api,
+    ns,
+    pending,
+    colorMode,
+    budgetStopped,
+    log,
+    signal,
+    persistState,
+  );
+  if (fetched.aborted) return fetched.aborted;
+  const { staged, quotaExhausted, quotaRemaining } = fetched;
+  if (staged.length === 0 && !budgetStopped) {
+    // 不在这里提前返回：即使一篇正文都不用写，本次也可能刚为旧记录补全了 path、
+    // 或跟随了语雀端的分组改名，目录索引页同样要按新分组重画。
+    // 记录落盘与索引页生成都在函数末尾统一处理。
+    log("没有需要写入的文档", "info");
+  }
+
+  // 内部链接 → Obsidian 双链（索引页也会用到索引与重名计数，故作为返回值带下去）
+  const { linkIndex, linkCounts, linksConverted } = convertInternalLinks(
+    plugin,
+    ns,
+    pending,
+    staged,
+    log,
+  );
+  if (linksConverted > 0) {
+    log(`已把 ${linksConverted} 条语雀文档链接转为本地双链`);
+  }
+
+  // 图片本地化
+  if (settings.yuqueDownloadImages) {
+    await localizeImages(plugin, api, task, staged, log);
+  }
+
+  // 写入文件
+  const writeResult = await writeStaged(
+    plugin,
+    task,
+    ns,
+    state,
+    staged,
+    quotaRemaining,
+    log,
+    signal,
+    persistState,
+  );
+  if (writeResult.aborted) return writeResult.aborted;
+  const { written, unchanged, backedUp, moved } = writeResult;
+  await persistState();
+  const summary =
+    `写入/更新 ${written} 篇` +
+    (unchanged > 0 ? `，内容未变 ${unchanged} 篇` : "") +
+    (relocated > 0 ? `，分组跟随语雀 ${relocated} 篇` : "") +
+    (moved > 0 ? `，位置跟随 ${moved} 篇` : "") +
+    (backedUp > 0 ? `，冲突备份 ${backedUp} 篇` : "");
+  if (quotaExhausted) {
+    // 不能说「完成」：否则用户会以为同步跑完了，实际上还有一批没拉
+    log(`「${task.repoName}」因配额用尽中止：${summary}`, "error");
+    log(
+      `剩余 ${quotaRemaining} 篇未拉取。配额恢复后，再次执行「语雀同步：立即同步全部任务」` +
+        `即从断点续跑——已成功写入的文档会被自动跳过，不需要手动清理记录。`,
+      "info",
+    );
+  } else if (budgetStopped) {
+    // 主动收工不是错误：本任务一篇都没开始拉，所以不能说「完成」，也不必标红
+    log(`「${task.repoName}」按请求预算收工：${summary}`, "info");
+    log(
+      `本任务还有 ${pending.length} 篇未拉取。执行「语雀同步：立即同步全部任务」即可从断点续跑` +
+        `——已成功写入的文档会被自动跳过，不需要手动清理记录。`,
+      "info",
+    );
+  } else {
+    log(`「${task.repoName}」完成：${summary}`, "success");
+  }
 
   // 生成/更新「知识库目录」索引页：按语雀目录树的原始顺序，带层级缩进与双链
   if (toc.length > 0 && task.mode === "all") {
-    try {
-      const slugToTitle = new Map<string, string>();
-      for (const t of targets) slugToTitle.set(t.slug, sanitizeFileName(t.title));
-      const byUuid = new Map<string, YuqueTocNode>();
-      for (const n of toc) byUuid.set(n.uuid, n);
-      const lines: string[] = [`# ${task.repoName} · 知识库目录`, ""];
-      for (const n of toc) {
-        // 层级：沿 parent_uuid 数深度（TITLE 分组节点与 DOC 节点都算一层）
-        let depth = 0;
-        let cur: YuqueTocNode | undefined = n;
-        const guard = new Set<string>();
-        while (cur?.parent_uuid && !guard.has(cur.parent_uuid)) {
-          guard.add(cur.parent_uuid);
-          cur = byUuid.get(cur.parent_uuid);
-          depth++;
-        }
-        const indent = "  ".repeat(depth);
-        if (n.type === "DOC" && n.slug && slugToTitle.has(n.slug)) {
-          // 索引页点击最频繁，重名坑同样要按「唯一用短、撞车用路径」处理
-          const base = slugToTitle.get(n.slug)!;
-          const target = linkIndex.get(stateKey(ns, n.slug)) ?? { path: "", basename: base };
-          const unique = (linkCounts.get(target.basename) ?? 0) <= 1;
-          lines.push(`${indent}- ${buildInternalLink(target, n.title, unique)}`);
-        } else if (n.title) {
-          lines.push(`${indent}- **${n.title}**`);
-        }
-      }
-      const indexContent =
-        propertiesBlock({
-          [FM.title]: `${task.repoName} 知识库目录`,
-          [FM.source]: `https://www.yuque.com/${ns}`,
-        }) + `${lines.join("\n")}\n`;
-      const indexPath = joinPath(task.targetFolder, `${sanitizeFileName(task.repoName)} 目录.md`);
-      if (indexPath.includes("/")) {
-        await ensureFolder(plugin.app, indexPath.slice(0, indexPath.lastIndexOf("/")));
-      }
-      const existingIndex = plugin.app.vault.getAbstractFileByPath(indexPath);
-      let indexChanged = true;
-      if (existingIndex instanceof TFile) {
-        // 内容一致就不写：这篇索引现在每轮同步都会走到（哪怕一篇正文都没改），
-        // 无脑 modify 只会把它的修改时间无谓地刷新一遍
-        const previous = await plugin.app.vault.read(existingIndex);
-        indexChanged = previous !== indexContent;
-        if (indexChanged) await plugin.app.vault.modify(existingIndex, indexContent);
-      } else {
-        await plugin.app.vault.create(indexPath, indexContent);
-      }
-      if (indexChanged) log(`已更新知识库目录索引：${indexPath}`, "success");
-    } catch (e) {
-      log(`目录索引生成失败：${(e as Error).message}`, "error");
-    }
+    await writeTocIndex(plugin, task, ns, toc, targets, linkIndex, linkCounts, log);
   }
+
+  return {
+    stop: quotaExhausted ? "quota" : budgetStopped ? "budget" : "done",
+    remainingDocs: quotaExhausted ? quotaRemaining : budgetStopped ? pending.length : 0,
+  };
 }
 
 /**
@@ -687,7 +953,7 @@ export async function syncAllTasks(
     log("还没有同步任务，请先在设置或用「添加语雀同步任务」命令创建", "error");
     return;
   }
-  const api = new YuqueApi(settings.yuqueToken);
+  const api = plugin.createApi();
   for (let i = 0; i < list.length; i++) {
     const task = list[i];
     if (signal?.aborted) {
@@ -696,7 +962,24 @@ export async function syncAllTasks(
     }
     if (list.length > 1) log(`—— [${i + 1}/${list.length}] 「${task.repoName}」——`);
     try {
-      await syncTask(plugin, api, task, log, signal);
+      const outcome = await syncTask(plugin, api, task, log, signal);
+      if (outcome?.stop === "quota") {
+        log(
+          "语雀 API 配额已用尽，余下任务本次不再执行。配额恢复后，" +
+            "再执行一次「语雀同步：立即同步全部任务」即可从断点续跑（已完成的会自动跳过）。",
+          "error",
+        );
+        return;
+      }
+      if (outcome?.stop === "budget") {
+        // 主动收工：余下任务留着，不算失败，也不必让用户等窗口
+        log(
+          "本次同步的请求预算已用完，余下任务留到下次。「语雀同步：立即同步全部任务」会接着跑。",
+          "info",
+        );
+        return;
+      }
+      if (outcome?.stop === "aborted") return;
     } catch (e) {
       log(`任务「${task.repoName}」失败：${(e as Error).message}`, "error");
     }

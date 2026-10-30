@@ -1,6 +1,8 @@
 import { MarkdownView, TFile, debounce } from "obsidian";
 import type { YuqueStylePlugin } from "./main";
+import { countWords, formatWordCount, readingMinutes } from "./doc-meta";
 import { readFm } from "./yuque/frontmatter";
+import { openLightbox, pickZoomableImage } from "./lightbox";
 
 /**
  * 阅读模式增强（语雀风格）：
@@ -23,6 +25,17 @@ export class ReaderEnhancer {
     this.plugin.registerMarkdownPostProcessor(() => { refresh(); });
     // 兜底轮询：视图/文件/模式变化后自动补装饰，无变化时开销极小
     this.plugin.registerInterval(window.setInterval(() => this.refresh(), 1500));
+
+    // ---- 图片灯箱：点击正文图片全屏放大（语雀同款）----
+    // 事件委托挂在 document 上：预览内容会随渲染重建，逐图挂监听器会被反复冲掉
+    this.plugin.registerDomEvent(document, "click", (evt) => {
+      if (!this.plugin.settings.reader) return;
+      const hit = pickZoomableImage(evt.target);
+      if (hit) {
+        evt.preventDefault();
+        openLightbox(hit.src, hit.alt);
+      }
+    });
   }
 
   /** force = true 时无视缓存强制重新装饰 */
@@ -114,15 +127,10 @@ export class ReaderEnhancer {
     const meta = createEl("div", { cls: "yuque-doc-meta" });
     // 元信息全放在同一个 then 里，保证显示顺序稳定（字数与时长需要正文）
     void this.plugin.app.vault.cachedRead(file).then((content: string) => {
-      const plain = content
-        .replace(/```[\s\S]*?```/g, " ")
-        .replace(/[#>*_`~|\[\]()!-]/g, " ");
-      const words = plain.replace(/\s+/g, "").length;
-      meta.createSpan({ text: `${words} 字` });
-      if (this.plugin.settings.showReadingTime) {
-        const minutes = Math.max(1, Math.round(words / 400));
-        meta.createSpan({ text: `约 ${minutes} 分钟读完` });
-      }
+      // 字数与时长口径统一走 doc-meta：顶部元信息行显示的是同一套数字
+      const words = countWords(content);
+      meta.createSpan({ text: formatWordCount(words) });
+      meta.createSpan({ text: `约 ${readingMinutes(words)} 分钟读完` });
       this.appendYuqueDate(meta, "创建于", readFm(fm, "createdAt"));
       this.appendYuqueDate(meta, "更新于", readFm(fm, "updatedAt"));
       // 读的是同步写下的「语雀标签」；旧实现读 frontmatter.tags，
